@@ -1,0 +1,300 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+#
+# Usage:
+#
+#   Start the full stack (worker + infrastructure):
+#     ./worker/up.sh
+#
+#   Start only support services (ClickHouse, MinIO, Nessie, Temporal):
+#     COMPOSE_PROJECT_NAME=aodt_$USER docker compose -f worker/docker-compose.yml up -d clickhouse minio minio-init nessie temporal-postgresql temporal-schema temporal temporal-namespace
+#
+# Environment variables:
+#   SIM_IMAGE             — EM worker image to run. Defaults to the published runtime image.
+#   GIS_IMAGE             — GIS worker image to run. Defaults to the published runtime image.
+#   SERVER_IP             — public IP of this machine. Set by up.sh. Used in MINIO_SERVER_URL
+#                           and NESSIE_S3_ENDPOINT so external clients get reachable URLs.
+#   MINIO_API_PORT        — host port for MinIO S3 API (default: 9000). Change if port conflicts.
+#   MINIO_CONSOLE_PORT    — host port for MinIO web console (default: 9001).
+#   NESSIE_PORT           — host port for Nessie Iceberg REST catalog (default: 19120).
+#   AODT_UCX_PORT         — UCX CM listener port (default: 13337).
+#   AODT_UCX_HOST         — hostname/IP the worker advertises for UCX connections. Set automatically by up.sh.
+#   AODT_UCX_WORKER_PORTS — port range for UCX worker data-path sockets (default: 13338-13350).
+
+services:
+
+  worker:
+    image: ${SIM_IMAGE:-nvcr.io/nvidia/aerial/aodt-sim-runtime:1.5.0}
+    ports:
+      - "50051:50051"
+      - "${AODT_UCX_PORT:-13337}:${AODT_UCX_PORT:-13337}"
+      - "${AODT_UCX_WORKER_PORTS:-13338-13350}:${AODT_UCX_WORKER_PORTS:-13338-13350}"
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: all
+      AODT_UCX_PORT: ${AODT_UCX_PORT:-13337}
+      AODT_UCX_HOST: ${AODT_UCX_HOST:-}
+      # UCX uses two separate port groups:
+      #   AODT_UCX_PORT (13337): CM listener — handles connection setup.
+      #   AODT_UCX_WORKER_PORTS (13338-13350): worker data-path sockets — the
+      #     ephemeral port UCX binds for actual tag-send/recv transfers.
+      #   UCX_TCP_PORT_RANGE constrains the worker sockets to the published
+      #     range so remote clients can reach them through Docker NAT.
+      UCX_TLS: ${UCX_TLS:-tcp,cuda_copy}
+      UCX_TCP_PORT_RANGE: ${AODT_UCX_WORKER_PORTS:-13338-13350}
+      # Restrict UCX to eth0 so it uses TCP CM (tcp) instead of rdmacm
+      # (InfiniBand CM). rdmacm breaks container-to-container UCX because
+      # its IB CM path is not reachable from other Docker containers.
+      # cuda_copy enables GPU->CPU staging for TCP transfers of device memory.
+      UCX_NET_DEVICES: ${UCX_NET_DEVICES:-eth0}
+      UCX_SOCKADDR_TLS_PRIORITY: ${UCX_SOCKADDR_TLS_PRIORITY:-tcp}
+      UCX_TCP_CM_REUSEADDR: ${UCX_TCP_CM_REUSEADDR:-y}
+      TEMPORAL_HOST: ${TEMPORAL_HOST:-temporal:7233}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+    volumes:
+      - ./config_ran.json:/opt/nvidia/aodt_sim/src_be/components/common/config_ran.json
+      - ./data:/data
+      - /tmp/aodt_cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      nessie:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      temporal-namespace:
+        condition: service_completed_successfully
+
+  gis-worker:
+    image: ${GIS_IMAGE:-nvcr.io/nvidia/aerial/aodt-gis-runtime:1.5.0}
+    environment:
+      TEMPORAL_HOST: ${TEMPORAL_HOST:-temporal:7233}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_S3_ADDRESSING_STYLE: path
+    depends_on:
+      temporal:
+        condition: service_healthy
+      temporal-namespace:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # --- Infrastructure services (ClickHouse, MinIO, Nessie, Temporal) --------
+  # Services are reachable by name within the compose network:
+  #   ClickHouse → clickhouse:9000
+  #   MinIO S3   → minio:9000
+  #   Nessie     → nessie:19120
+  #   Temporal   → temporal:7233
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.10.3.21
+    environment:
+      CLICKHOUSE_ALLOW_EMPTY_PASSWORD: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/aodt-overrides.xml:/etc/clickhouse-server/config.d/aodt-overrides.xml:ro
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"     # S3 API — accessible to remote clients
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # web console
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # Tells MinIO what public URL to embed in presigned URLs it hands to clients.
+      # Must be the server's externally reachable address, set by up.sh.
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-17T19-35-25Z
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    entrypoint: >
+      /bin/sh -c "
+        until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do
+          echo 'Waiting for minio...' && sleep 2
+        done &&
+        mc mb --ignore-existing local/aerial-data &&
+        echo 'Bucket aerial-data ready'
+      "
+
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.107.4
+    ports:
+      - "${NESSIE_PORT:-19120}:19120"   # Iceberg REST catalog — accessible to remote clients
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - nessie-data:/home/nessie
+    environment:
+      NESSIE_VERSION_STORE_TYPE: ROCKSDB
+      NESSIE_VERSION_STORE_PERSIST_ROCKS_DATABASE_PATH: /home/nessie/rocks-data
+      NESSIE_CATALOG_DEFAULT_WAREHOUSE: "warehouse"
+      NESSIE_CATALOG_WAREHOUSES_WAREHOUSE_LOCATION: "s3://aerial-data/"
+      # Use the server's public IP so external clients get a reachable S3 endpoint
+      # from the Iceberg REST catalog. Set by up.sh via SERVER_IP.
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ENDPOINT: ${NESSIE_S3_ENDPOINT:-http://minio:9000}
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_PATH_STYLE_ACCESS: "true"
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_REGION: "us-east-1"
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ACCESS_KEY: "urn:nessie-secret:quarkus:s3creds"
+      S3CREDS_NAME: ${MINIO_ROOT_USER:-minioadmin}
+      S3CREDS_SECRET: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:19120/api/v2/config"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  # --- Temporal services ----------------------------------------------------
+  # Temporal workflow engine used by the GIS prepare-map pipeline.
+  # The worker connects to temporal:7233 via the TEMPORAL_HOST env var.
+  # Setup sequence: temporal-postgresql → temporal-schema → temporal → temporal-namespace
+
+  temporal-postgresql:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  temporal-schema:
+    image: temporalio/admin-tools:1.29.1-tctl-1.18.4-cli-1.5.0
+    restart: on-failure:6
+    depends_on:
+      temporal-postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-postgresql
+      - SQL_PASSWORD=temporal
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        echo 'Waiting for PostgreSQL...'
+        nc -z -w 10 "$${POSTGRES_SEEDS}" "$${DB_PORT}"
+        temporal-sql-tool --plugin postgres12 --ep "$${POSTGRES_SEEDS}" -u "$${POSTGRES_USER}" -p "$${DB_PORT}" --db temporal create
+        temporal-sql-tool --plugin postgres12 --ep "$${POSTGRES_SEEDS}" -u "$${POSTGRES_USER}" -p "$${DB_PORT}" --db temporal setup-schema -v 0.0
+        temporal-sql-tool --plugin postgres12 --ep "$${POSTGRES_SEEDS}" -u "$${POSTGRES_USER}" -p "$${DB_PORT}" --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+        temporal-sql-tool --plugin postgres12 --ep "$${POSTGRES_SEEDS}" -u "$${POSTGRES_USER}" -p "$${DB_PORT}" --db temporal_visibility create
+        temporal-sql-tool --plugin postgres12 --ep "$${POSTGRES_SEEDS}" -u "$${POSTGRES_USER}" -p "$${DB_PORT}" --db temporal_visibility setup-schema -v 0.0
+        temporal-sql-tool --plugin postgres12 --ep "$${POSTGRES_SEEDS}" -u "$${POSTGRES_USER}" -p "$${DB_PORT}" --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+        echo 'PostgreSQL schema setup complete'
+
+  temporal:
+    image: temporalio/server:1.29.1
+    depends_on:
+      temporal-schema:
+        condition: service_completed_successfully
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-postgresql
+      - ENABLE_ES=false
+      - BIND_ON_IP=0.0.0.0
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7233"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 60
+
+  temporal-namespace:
+    image: temporalio/admin-tools:1.29.1-tctl-1.18.4-cli-1.5.0
+    restart: on-failure:5
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - DEFAULT_NAMESPACE=default
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        NAMESPACE=$${DEFAULT_NAMESPACE:-default}
+        echo 'Waiting for Temporal server...'
+        nc -z -w 10 temporal 7233
+        max_attempts=3
+        attempt=0
+        until temporal operator cluster health --address "$${TEMPORAL_ADDRESS}"; do
+          attempt=$$((attempt + 1))
+          if [ "$$attempt" -ge "$$max_attempts" ]; then
+            echo "Server did not become healthy after $$max_attempts attempts"
+            exit 1
+          fi
+          echo "Server not ready yet, waiting... (attempt $$attempt/$$max_attempts)"
+          sleep 5
+        done
+        temporal operator namespace describe -n "$$NAMESPACE" --address "$${TEMPORAL_ADDRESS}" || \
+          temporal operator namespace create -n "$$NAMESPACE" --address "$${TEMPORAL_ADDRESS}"
+        echo "Namespace '$$NAMESPACE' ready"
+
+  temporal-admin-tools:
+    image: temporalio/admin-tools:1.29.1-tctl-1.18.4-cli-1.5.0
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    entrypoint: ["temporal"]
+
+volumes:
+  clickhouse-data:
+  minio-data:
+  temporal-pg-data:
+  nessie-data:

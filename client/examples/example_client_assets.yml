@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+du: test_data/assets/du.json
+ru: test_data/assets/gnb.json
+ue: test_data/assets/ue.json
+materials: test_data/assets/materials.json
+scatterers: test_data/assets/car_small.json
+vegetation_materials: test_data/assets/vegetation_materials.json
+vegetation_assets: test_data/assets/street_tree.json
+scenario: test_data/assets/scenario.json
+panels: test_data/assets/panel.json

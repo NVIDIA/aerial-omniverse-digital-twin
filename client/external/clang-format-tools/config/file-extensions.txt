@@ -1,0 +1,13 @@
+.cpp
+.h
+.c
+.hpp
+.cc
+.cxx
+.hxx
+.inl
+.tcc
+.cu
+.cuh
+.hpp.in
+.h.in

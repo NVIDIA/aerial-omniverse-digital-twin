@@ -1,0 +1,43 @@
+{
+  "include": [
+    "**/*",
+    "**/.server/**/*",
+    "**/.client/**/*",
+    ".react-router/types/**/*"
+  ],
+  "compilerOptions": {
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "types": ["node", "vite/client"],
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "rootDirs": [".", "./.react-router/types"],
+    "baseUrl": ".",
+    "paths": {
+      "~/*": ["./app/*"],
+      "@/types": ["./app/types"],
+      "@/types/*": ["./app/types/*"],
+      "@/constants": ["./app/constants"],
+      "@/constants/*": ["./app/constants/*"],
+      "@/services": ["./app/services"],
+      "@/services/*": ["./app/services/*"],
+      "@/features": ["./app/features"],
+      "@/features/*": ["./app/features/*"],
+      "@/hooks": ["./app/hooks"],
+      "@/hooks/*": ["./app/hooks/*"],
+      "@/components": ["./app/components"],
+      "@/components/*": ["./app/components/*"],
+      "@/store": ["./app/store"],
+      "@/store/*": ["./app/store/*"],
+      "@/utils": ["./app/utils"],
+      "@/utils/*": ["./app/utils/*"]
+    },
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true
+  }
+}

@@ -1,0 +1,737 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dt_service;
+
+/*
+ * Digital Twin Worker Service - API Overview
+ * 
+ * This service provides GPU-accelerated channel matrix computation and simulation
+ * control for wireless network digital twins.
+ * 
+ * Temporal Modes:
+ * 
+ *    The system supports two temporal indexing modes based on the scenario configuration:
+ * 
+ *    - Mode 1 (Slot/Symbols): Discrete slot-based temporal indexing
+ *        • Used for scenarios with slot-level time resolution
+ *        • Indexing: batch_index + slot_index (within batch)
+ *        • Total time points = total_batches × slots_per_batch × samples_per_slot
+ *        • Use SlotIndex(slot) for API calls
+ *        • Example: batch=0, slot=5 refers to the 5th slot in batch 0
+ * 
+ *    - Mode 2 (Duration/Interval): Continuous time-step based temporal indexing
+ *        • Used for scenarios with time intervals (e.g., fixed timestep simulation)
+ *        • Indexing: batch_index + time_step_index (within batch)
+ *        • Each time step represents a fixed time interval
+ *        • Use TimeStepIndex(time_step) for API calls
+ *        • Example: duration=10s, interval=1s → 11 time steps (t=0s, 1s, 2s, ..., 10s), time_step_index=[0, 1, ...10]
+ * 
+ *    Note: The temporal mode is determined by the scenario YAML configuration at startup
+ *          and remains fixed for the lifetime of the loaded scenario. All API requests
+ *          must use the temporal index type (SlotIndex or TimeStepIndex) matching the
+ *          scenario's configured mode, otherwise the server will return an error.
+ * 
+ * API Call Structure:
+ * 
+ * 0. Session Management (single-client enforcement):
+ *    - Connect: ConnectRequest -> ConnectReply
+ *    - Disconnect: DisconnectRequest -> DisconnectReply
+ * 
+ * 1. Scenario Management:
+ *    - Start: StartRequest -> StartReply
+ *    - GetScenarioStatus: ScenarioStatusRequest -> ScenarioStatusReply
+ *    - RunFullSimulation: RunFullSimulationRequest -> stream RunFullSimulationProgress
+ *    - CancelSimulation: CancelSimulationRequest -> CancelSimulationReply
+ * 
+ * 2. Position Queries:
+ *    - GetRUPositions: RUPositionRequest -> RUPositionReply
+ *    - GetUEPositions: UEPositionRequest -> UEPositionReply
+ * 
+ * 3. Channel Matrix Operations (GPU IPC):
+ *    - AllocateChannelMatrixMemory: ChannelMatrixAllocRequest -> ChannelMatrixAllocReply
+ *    - GetChannelMatrix: ChannelMatrixRequest -> ChannelMatrixReply
+ *    - DeallocateChannelMatrixMemory: ChannelMatrixDeallocRequest -> StatusReply
+ * 
+ * 4. Channel Impulse Response (CIR) Operations (GPU IPC):
+ *    - AllocateCIRResultsMemory: CIRResultsAllocRequest -> CIRResultsAllocReply
+ *    - GetChannelImpulseResponse: CIRResultsRequest -> stream CIRResultsProgress
+ *    - DeallocateCIRResultsMemory: CIRResultsDeallocRequest -> StatusReply
+ * 
+ * 5. Data Export and Cleanup:
+ *    - ExportResults: ExportResultsRequest -> stream ExportResultsProgress
+ *    - ClearExportedResults: ClearExportedResultsRequest -> StatusReply
+ * 
+ * 6. GIS Map Preparation:
+ *    - PrepareMap: PrepareMapRequest -> stream PrepareMapProgress
+ * 
+ * 7. Logging:
+ *    - StreamLogs: StreamLogsRequest -> stream ServerLogMessage
+ * 
+ * Common Message Types:
+ *    - Position3D: 3D coordinates (x, y, z)
+ *    - MatrixShape: Tensor shape descriptor with dimensions and dtype
+ *    - IntList: Helper for lists of integers
+ *    - StatusReply: Generic success/error response
+ */
+
+enum TransportMode {
+  LOCAL_IPC = 0;       // Same GPU — true zero-copy via CUDA IPC handles
+  REMOTE = 1;          // Remote transfer — protocol is selected by RemoteTransferProtocol
+}
+
+enum RemoteTransferProtocol {
+  GRPC = 0;            // Chunked gRPC stream for remote bulk data
+  UCX = 1;             // UCX transfer — developer opt-in path
+}
+
+// Service for GPU computation
+service DTWorker {
+  
+  // Acquire the single-client lock. Rejected if another client is active.
+  rpc Connect (ConnectRequest) returns (ConnectReply) {}
+
+  // Release the single-client lock and clean up server state.
+  rpc Disconnect (DisconnectRequest) returns (DisconnectReply) {}
+
+  // Negotiate data transport mode and remote bulk-data backend
+  rpc NegotiateDataTransport (DataTransportRequest) returns (DataTransportReply) {}
+
+  // Start a new scenario with YAML configuration
+  rpc Start (StartRequest) returns (StartReply) {}
+  
+  // Get current scenario status
+  rpc GetScenarioStatus (ScenarioStatusRequest) returns (ScenarioStatusReply) {}
+  
+  // Run full simulation (all batches, all time steps) - server-side streaming for progress
+  rpc RunFullSimulation (RunFullSimulationRequest) returns (stream RunFullSimulationProgress) {}
+
+  // Run calibration setup/pipeline - server-side streaming for progress
+  rpc RunCalibration (RunCalibrationRequest) returns (stream RunCalibrationProgress) {}
+  
+  // Get RU positions for a specific slot
+  rpc GetRUPositions (RUPositionRequest) returns (RUPositionReply) {}
+  
+  // Get UE positions for a specific slot
+  rpc GetUEPositions (UEPositionRequest) returns (UEPositionReply) {}
+  
+  // Allocate GPU memory for channel matrix and return IPC handle
+  rpc AllocateChannelMatrixMemory (ChannelMatrixAllocRequest) returns (ChannelMatrixAllocReply) {}
+  
+  // Get channel matrix with GPU IPC (fills pre-allocated memory)
+  rpc GetChannelMatrix (ChannelMatrixRequest) returns (ChannelMatrixReply) {}
+  
+  // Deallocate GPU memory for channel matrix
+  rpc DeallocateChannelMatrixMemory (ChannelMatrixDeallocRequest) returns (StatusReply) {}
+  
+  // Allocate GPU memory for CIR results and return IPC handle
+  rpc AllocateCIRResultsMemory (CIRResultsAllocRequest) returns (CIRResultsAllocReply) {}
+  
+  // Get CIR (Channel Impulse Response) with GPU IPC - server-side streaming for progress
+  rpc GetChannelImpulseResponse (CIRResultsRequest) returns (stream CIRResultsProgress) {}
+  
+  // Deallocate GPU memory for CIR results
+  rpc DeallocateCIRResultsMemory (CIRResultsDeallocRequest) returns (StatusReply) {}
+
+  // Pull-based data transfer: client requests server to send a specific buffer via UCX
+  rpc RequestDataTransfer (DataTransferPullRequest) returns (DataTransferPullReply) {}
+
+  // Chunked remote data transfer over gRPC
+  rpc StreamDataTransfer (DataTransferPullRequest) returns (stream DataTransferChunk) {}
+  
+  // Export result tables from ClickHouse to Parquet files on S3.
+  // Requires a loaded scenario with parquet_export config.
+  // Existing files for the same time range are overwritten.
+  // Streams ExportResultsProgress to report progress.
+  rpc ExportResults (ExportResultsRequest) returns (stream ExportResultsProgress) {}
+
+  // Clear result data from ClickHouse and/or delete exported Parquet files from S3.
+  // Requires a loaded scenario. The scenario remains loaded after clearing.
+  rpc ClearExportedResults (ClearExportedResultsRequest) returns (StatusReply) {}
+
+  // Cancel any in-progress streaming operation (RunFullSimulation, GetChannelImpulseResponse,
+  // or ExportResults). The cancellation is best-effort: the server stops at the next safe point.
+  // Requires the cancelled operation to be running concurrently (e.g., from another thread).
+  rpc CancelSimulation (CancelSimulationRequest) returns (CancelSimulationReply) {}
+
+  // Stream server log messages to the client in real time.
+  // The client subscribes once (typically on a background thread) and receives log lines
+  // as they are produced. The stream runs until the client cancels it.
+  // The min_level field filters logs on the server side (client-side filter only;
+  // cannot go below the server's configured --log level).
+  rpc StreamLogs (StreamLogsRequest) returns (stream ServerLogMessage) {}
+
+  // Prepare a GIS map from OSM or GML data. Does not require a loaded scenario.
+  // The server proxies this request to a Temporal workflow internally.
+  // Streams PrepareMapProgress heartbeats while the workflow runs.
+  rpc PrepareMap (PrepareMapRequest) returns (stream PrepareMapProgress) {}
+}
+
+// Standard data transfer
+message DataRequest {
+  bytes data = 1;           // Raw data from CPU
+  int32 size = 2;           // Data size
+  string operation = 3;     // Operation to perform
+}
+
+message DataReply {
+  bytes result = 1;         // Result data
+  int32 size = 2;
+  float processing_time_ms = 3;
+}
+
+// GPU IPC approach (zero-copy on same machine)
+message GPURequest {
+  bytes ipc_handle = 1;     // CUDA IPC handle
+  int32 size = 2;
+  string operation = 3;
+}
+
+message GPUReply {
+  bytes ipc_handle = 1;     // Result CUDA IPC handle
+  int32 size = 2;
+  float processing_time_ms = 3;
+  bool success = 4;
+}
+
+// GPU memory allocation
+message AllocRequest {
+  int32 size = 1;           // Size in bytes
+}
+
+message GPUMemoryHandle {
+  bytes ipc_handle = 1;
+  int32 size = 2;
+  uint64 device_ptr = 3;    // Device pointer (for reference)
+}
+
+message StatusReply {
+  bool success = 1;
+  string message = 2;
+}
+
+// Single-client session management
+message ConnectRequest {
+  bool force = 1;           // if true, kick out any existing client
+}
+
+message ConnectReply {
+  bool success = 1;
+  string message = 2;
+  string client_id = 3;    // session identifier, used by Disconnect
+}
+
+message DisconnectRequest {
+  string client_id = 1;     // must match the session that called Connect
+}
+
+message DisconnectReply {
+  bool success = 1;
+  string message = 2;
+}
+
+// Data transport negotiation request
+message DataTransportRequest {
+  string client_hostname = 1;
+  bytes client_gpu_uuid = 2;       // 16-byte cudaUUID_t
+}
+
+// Data transport negotiation reply
+message DataTransportReply {
+  bool success = 1;
+  string message = 2;
+  TransportMode mode = 3;
+  string ucx_host = 4;             // only set if REMOTE + UCX
+  uint32 ucx_port = 5;             // only set if REMOTE + UCX
+  string server_hostname = 6;
+  bytes server_gpu_uuid = 7;
+  RemoteTransferProtocol remote_transfer_protocol = 8; // protocol used when mode == REMOTE
+}
+
+// RU Position request
+message RUPositionRequest {
+  // No fields needed - RUs are static infrastructure
+}
+
+// 3D Position
+message Position3D {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+// RU Position reply
+message RUPositionReply {
+  repeated Position3D positions = 1;  // List of RU positions
+  int32 count = 2;                   // Number of RU positions
+}
+
+// UE Position request
+message UEPositionRequest {
+  int32 batch_index = 1;        // Batch index to get UE positions for
+  oneof temporal_index {
+    int32 slot_index = 2;       // Slot index (Mode 1: Slot/Symbols)
+    int32 time_step_index = 3;  // Time step index (Mode 2: Duration/Interval)
+  }
+}
+
+// UE Position reply  
+message UEPositionReply {
+  repeated Position3D positions = 1;  // List of UE positions
+  int32 count = 2;                   // Number of UE positions
+}
+
+// Channel Matrix memory allocation request
+message ChannelMatrixAllocRequest {
+  repeated int32 ru_indices = 1;        // List of RU indices
+  repeated IntList ue_indices = 2;       // UE indices per RU (list of lists, must match length of ru_indices)
+  bool is_full_antenna_pair = 3;        // true for full antenna pair, false for single
+}
+
+// Channel Matrix memory allocation reply
+message ChannelMatrixAllocReply {
+  repeated bytes ipc_handles = 1;    // List of CUDA IPC handles (one per RU)
+  repeated MatrixShape shapes = 2;   // List of shapes (one per RU)
+  bool success = 3;                  // Success flag
+  string message = 4;                // Status/error message
+  repeated int64 buffer_sizes = 5;   // Buffer size in bytes per RU (always set, both modes)
+  TransportMode transport_mode = 6;  // Transport mode used for this allocation
+  repeated string allocation_keys = 7; // Server-side allocation keys (one per RU, for pull-based transfer)
+}
+
+// Channel Matrix memory deallocation request
+message ChannelMatrixDeallocRequest {
+  repeated bytes ipc_handles = 1;    // List of CUDA IPC handles to deallocate
+}
+
+// Channel Matrix request (uses pre-allocated memory)
+message ChannelMatrixRequest {
+  repeated bytes ipc_handles = 1;       // List of CUDA IPC handles to pre-allocated memory (one per RU)
+  int32 batch_index = 2;                // Batch index
+  oneof temporal_index {
+    int32 slot_index = 3;               // Slot index (Mode 1: Slot/Symbols)
+    int32 time_step_index = 4;          // Time step index (Mode 2: Duration/Interval)
+  }
+  repeated int32 ru_indices = 5;        // List of RU indices
+  repeated IntList ue_indices = 6;      // UE indices per RU (list of lists, must match length of ru_indices)
+  bool is_full_antenna_pair = 7;        // true for full antenna pair, false for single
+}
+
+// Generic list of integers
+message IntList {
+  repeated int32 values = 1;         // List of integer values
+}
+
+// Nested list of integers (list of lists)
+message IntListList {
+  repeated IntList lists = 1;        // List of IntList
+}
+
+// Generic list of 64-bit integers
+message Int64List {
+  repeated int64 values = 1;         // List of int64 values
+}
+
+// List of bytes (for per-time-step IPC handles)
+message BytesList {
+  repeated bytes handles = 1;
+}
+
+// Generic tensor shape information (like numpy)
+message MatrixShape {
+  repeated int32 dimensions = 1;     // Shape dimensions (e.g., [64, 4, 14, 2] for antennas×users×symbols×I/Q)
+  int32 total_elements = 2;          // Total number of elements (product of all dimensions)
+  string dtype = 3;                  // Data type (e.g., "complex64", "float32")
+}
+
+// List of MatrixShape (for per-time-step organization)
+message MatrixShapeList {
+  repeated MatrixShape shapes = 1;
+}
+
+// Channel Matrix reply (memory pre-allocated by client)
+message ChannelMatrixReply {
+  repeated MatrixShape shape = 1;    // Shapes of the computed channel matrices (one per RU)
+  float processing_time_ms = 2;      // Processing time
+  bool success = 3;                  // Success flag
+  string message = 4;                // Status/error message
+}
+
+// CIR Results memory allocation request (Batch style)
+// Allocates GPU memory that can hold CIR results for all time steps.
+// Each time step can have different RU/UE configurations (variable sizes per time step).
+message CIRResultsAllocRequest {
+  // Per-time-step RU/UE configuration
+  repeated IntList ru_indices_per_ts = 1;             // RU indices for each time step [num_time_steps][num_rus]
+  repeated IntListList ue_indices_per_ts = 2;         // UE indices per RU for each time step [num_time_steps][num_rus][num_ues]
+  bool is_full_antenna_pair = 3;                      // true for full antenna pair, false for single
+  // num_time_steps is inferred from length of ru_indices_per_ts
+}
+
+// CIR Results memory allocation reply (Batch style)
+// Returns single IPC handles for the batch with per-time-step offset metadata.
+// Each time step can have different sizes due to variable RU/UE configurations.
+message CIRResultsAllocReply {
+  // Single IPC handle for entire contiguous buffer (all time steps)
+  bytes values_ipc_handle = 1;                        // Single CUDA IPC handle for all CIR values
+  bytes delays_ipc_handle = 2;                        // Single CUDA IPC handle for all delays
+  bytes angles_of_departure_ipc_handle = 19;         // Single CUDA IPC handle for all AODs
+  bytes angles_of_arrival_ipc_handle = 20;           // Single CUDA IPC handle for all AOAs
+  
+  // Per-time-step, per-RU shape info (variable per time step)
+  repeated MatrixShapeList values_shapes_per_ts = 3;  // CIR value shapes [num_time_steps][num_rus]
+  repeated MatrixShapeList delays_shapes_per_ts = 4;  // CIR delay shapes [num_time_steps][num_rus]
+  repeated MatrixShapeList angles_of_departure_shapes_per_ts = 21;  // AOD shapes [num_time_steps][num_rus]
+  repeated MatrixShapeList angles_of_arrival_shapes_per_ts = 22;    // AOA shapes [num_time_steps][num_rus]
+  
+  // Buffer layout metadata - per-time-step offsets (variable sizes)
+  // All offsets are in ELEMENTS (not bytes)
+  repeated int64 values_time_step_offsets = 7;        // Cumulative element offset for each time step from buffer start [num_time_steps]
+  repeated int64 delays_time_step_offsets = 8;        // Cumulative element offset for each time step from buffer start [num_time_steps]
+  repeated Int64List values_ru_offsets_per_ts = 9;    // Element offset for each RU within each time step [num_time_steps][num_rus]
+  repeated Int64List delays_ru_offsets_per_ts = 10;   // Element offset for each RU within each time step [num_time_steps][num_rus]
+  repeated int64 angles_of_departure_time_step_offsets = 23;      // Float32 element offsets for AOD buffer [num_time_steps]
+  repeated int64 angles_of_arrival_time_step_offsets = 24;        // Float32 element offsets for AOA buffer [num_time_steps]
+  repeated Int64List angles_of_departure_ru_offsets_per_ts = 25;  // Float32 element offsets for AOD [num_time_steps][num_rus]
+  repeated Int64List angles_of_arrival_ru_offsets_per_ts = 26;    // Float32 element offsets for AOA [num_time_steps][num_rus]
+  
+  // Total buffer sizes
+  int64 total_values_bytes = 11;                      // Total size of values buffer
+  int64 total_delays_bytes = 12;                      // Total size of delays buffer
+  int64 total_angles_of_departure_bytes = 27;         // Total size of AOD buffer
+  int64 total_angles_of_arrival_bytes = 28;           // Total size of AOA buffer
+  
+  bool success = 5;                                   // Success flag
+  string message = 6;                                 // Status/error message
+  int32 num_time_steps = 13;                          // Number of time steps allocated
+  
+  // Echo back the allocation config (for client reference)
+  repeated IntList ru_indices_per_ts = 14;            // RU indices for each time step [num_time_steps][num_rus]
+  repeated IntListList ue_indices_per_ts = 15;        // UE indices per RU for each time step [num_time_steps][num_rus][num_ues]
+  bool is_full_antenna_pair = 16;                     // Full antenna pair flag
+  TransportMode transport_mode = 17;                  // Transport mode used for this allocation
+  string allocation_key = 18;                           // Server-side allocation key (for pull-based transfer)
+}
+
+// CIR Results memory deallocation request (Batch style)
+message CIRResultsDeallocRequest {
+  bytes values_ipc_handle = 1;              // Single CUDA IPC handle for values buffer to deallocate
+  bytes delays_ipc_handle = 2;              // Single CUDA IPC handle for delays buffer to deallocate
+  string allocation_key = 3;                // Server-side allocation key (used in REMOTE mode)
+  bytes angles_of_departure_ipc_handle = 4; // Single CUDA IPC handle for AOD buffer to deallocate
+  bytes angles_of_arrival_ipc_handle = 5;   // Single CUDA IPC handle for AOA buffer to deallocate
+}
+
+// Wrapper for multiple slot indices (needed for oneof with repeated field)
+message SlotIndices {
+  repeated int32 values = 1;
+}
+
+// Wrapper for multiple time step indices (needed for oneof with repeated field)
+message TimeStepIndices {
+  repeated int32 values = 1;
+}
+
+// CIR Results request (Batch style - uses pre-allocated memory)
+// Computes CIR for one or more time steps in one RPC call; server handles each sequentially.
+message CIRResultsRequest {
+  bytes values_ipc_handle = 1;                        // CUDA IPC handle for values buffer
+  bytes delays_ipc_handle = 2;                        // CUDA IPC handle for delays buffer
+  int32 batch_index = 3;                              // Batch index
+  
+  // Temporal indices to compute; exactly one field must be set
+  oneof temporal_index {
+    int32 slot_index = 4;                             // Single slot (Mode 1)
+    int32 time_step_index = 5;                        // Single time step (Mode 2)
+    SlotIndices slot_indices = 6;                     // Multiple slots (Mode 1)
+    TimeStepIndices time_step_indices = 7;            // Multiple time steps (Mode 2)
+  }
+
+  string allocation_key = 8;                          // Server-side allocation key (used in REMOTE mode)
+  bytes angles_of_departure_ipc_handle = 9;          // CUDA IPC handle for AOD buffer
+  bytes angles_of_arrival_ipc_handle = 10;           // CUDA IPC handle for AOA buffer
+}
+
+// CIR Results reply (Batch style - memory pre-allocated by client)
+// Supports partial success: if some time steps fail, others may still succeed.
+message CIRResultsReply {
+  repeated int32 computed_temporal_indices = 1;       // Indices that were successfully computed (subset of requested)
+  float processing_time_ms = 2;                       // Processing time in milliseconds
+  bool success = 3;                                   // True only if all requested indices were computed
+  string message = 4;                                 // Status/error message
+}
+
+// Start Scenario request
+message StartRequest {
+  string yaml_config = 1;           // YAML configuration as string
+}
+
+// Start Scenario reply
+message StartReply {
+  bool success = 1;                 // Success flag
+  string message = 2;               // Status/error message
+  int32 num_rus = 3;                // Number of RUs in scenario
+  int32 num_ues = 4;                // Number of UEs in scenario
+  int32 total_batches = 5;          // Total number of batches
+  oneof temporal_steps {
+    int32 slots_per_batch = 6;      // Slots per batch (Mode 1: Slot/Symbols)
+    int32 time_steps_per_batch = 7; // Time steps per batch (Mode 2: Duration/Interval)
+  }
+}
+
+// Scenario Status request
+message ScenarioStatusRequest {
+  // No fields needed - just checking status
+}
+
+// Scenario Status reply
+message ScenarioStatusReply {
+  bool scenario_loaded = 1;         // Whether a scenario is currently loaded
+  string message = 2;               // Status message
+  int32 num_rus = 3;                // Number of RUs in current scenario (0 if none)
+  int32 num_ues = 4;                // Number of UEs in current scenario (0 if none)
+  int32 total_batches = 5;          // Total number of batches (0 if none)
+  oneof temporal_steps {
+    int32 slots_per_batch = 6;      // Slots per batch (Mode 1: Slot/Symbols)
+    int32 time_steps_per_batch = 7; // Time steps per batch (Mode 2: Duration/Interval)
+  }
+  int32 allocated_memory_blocks = 8; // Number of active GPU memory allocations
+}
+
+// Run Full Simulation request
+message RunFullSimulationRequest {
+  // Empty - No inputs needed
+}
+
+// Run Full Simulation reply (legacy, kept for reference)
+message RunFullSimulationReply {
+  bool success = 1;                   // Success flag
+  string message = 2;                 // Status/error message
+  int32 time_steps_completed = 3;     // Number of time steps completed
+  float total_time_seconds = 4;       // Total simulation time in seconds
+}
+
+// Run Full Simulation progress (streamed from server)
+// The server yields multiple progress messages during simulation, with the final
+// message indicating completion (stage="completed") or failure (stage="error").
+message RunFullSimulationProgress {
+  float percent_complete = 1;         // 0.0 to 100.0
+  int32 time_steps_completed = 2;     // Number of time steps completed so far
+  int32 total_time_steps = 3;         // Total number of time steps expected
+  float elapsed_seconds = 4;          // Wall-clock time elapsed so far
+  string stage = 5;                   // "running", "finalizing", "completed", "error"
+  bool success = 6;                   // Final status (meaningful in last message)
+  string message = 7;                 // Human-readable status message
+}
+
+// Run Calibration request
+message RunCalibrationRequest {
+  // Empty - uses active scenario loaded by Start
+}
+
+// Run Calibration progress (streamed from server)
+// First implementation reports coarse setup stages:
+// "started", "building_edges", "running", "completed", or "error".
+message RunCalibrationProgress {
+  float percent_complete = 1;         // 0.0 to 100.0
+  float elapsed_seconds = 2;          // Wall-clock time elapsed so far
+  string stage = 3;                   // "started", "building_edges", "running", "completed", "error"
+  bool success = 4;                   // Final status (meaningful in last message)
+  string message = 5;                 // Human-readable status message
+}
+
+// CIR Results progress (streamed from server)
+// The server yields multiple progress messages during CIR computation, with the final
+// message indicating completion (stage="completed") or failure (stage="error").
+message CIRResultsProgress {
+  float percent_complete = 1;         // 0.0 to 100.0
+  int32 current_index = 2;            // How many temporal indices completed so far
+  int32 total_indices = 3;            // Total temporal indices requested
+  repeated int32 computed_temporal_indices = 4;  // Indices that have been computed so far
+  float elapsed_ms = 5;              // Wall-clock time elapsed so far in milliseconds
+  string stage = 6;                   // "computing", "completed", "error"
+  bool success = 7;                   // Final status (meaningful in last message)
+  string message = 8;                 // Human-readable status message
+}
+
+// Pull-based data transfer request. Used by both gRPC streaming and UCX.
+message DataTransferPullRequest {
+  string allocation_key = 1;          // Server-side allocation identifier
+  string buffer_type = 2;             // "values", "delays", "angles_of_departure", "angles_of_arrival", or RU index string for channel matrix
+  uint64 tag = 3;                     // UCX tag for this transfer
+}
+
+// Pull-based data transfer reply
+message DataTransferPullReply {
+  bool success = 1;
+  string message = 2;
+  int64 size_bytes = 3;               // Actual bytes sent
+}
+
+// Chunk streamed by StreamDataTransfer. Offsets are byte offsets in the
+// destination buffer identified by DataTransferPullRequest.
+message DataTransferChunk {
+  bytes data = 1;           // Chunk payload bytes
+  int64 offset = 2;         // Byte offset in the full buffer
+  int64 total_size = 3;     // Full buffer size in bytes
+  string buffer_type = 4;   // Requested buffer identifier, e.g. "values"
+  bool eof = 5;             // Final chunk marker (end of file)
+  string message = 6;       // Optional status or error detail
+}
+
+message ExportResultsRequest {
+  repeated string tables = 1;         // Tables to export; empty = scenario defaults
+  oneof temporal_index {              // Optional; unset = export all
+    SlotIndices slot_indices = 2;
+    TimeStepIndices time_step_indices = 3;
+  }
+  int32 batch_index = 4;             // Only used with temporal_index
+}
+
+message ClearExportedResultsRequest {
+  bool clear_database = 1;           // Truncate result tables in ClickHouse
+  bool clear_exported_files = 2;     // Delete Parquet files from S3
+}
+
+// Progress update streamed during ExportResults.
+// The final message has stage="completed" (success=true) or stage="error" (success=false).
+message ExportResultsProgress {
+  float percent_complete = 1;         // 0.0 to 100.0
+  int32 files_exported = 2;           // Number of Parquet files written so far
+  int32 total_files = 3;              // Total number of Parquet files expected
+  int64 total_rows = 4;              // Total rows exported so far
+  float elapsed_seconds = 5;          // Wall-clock time elapsed
+  string stage = 6;                   // "started", "exporting", "completed", "error"
+  bool success = 7;                   // Final status (meaningful in last message)
+  string message = 8;                 // Human-readable status / error message
+}
+
+// Cancel simulation request
+message CancelSimulationRequest {
+  string reason = 1;                  // Optional human-readable reason for cancellation
+}
+
+// Cancel simulation reply
+message CancelSimulationReply {
+  bool success = 1;                   // Whether cancellation was accepted
+  string message = 2;                 // Status message
+}
+
+// StreamLogs request
+message StreamLogsRequest {
+  string min_level = 1;               // Minimum log level: "DEBUG", "INFO", "WARNING", "ERROR" (default: "INFO")
+}
+
+// Server log message (streamed from server)
+message ServerLogMessage {
+  string timestamp = 1;               // Formatted timestamp, e.g. "2025-03-12 14:30:05.123"
+  string level = 2;                   // Log level: "INFO", "WARNING", "ERROR", "DEBUG", etc.
+  string message = 3;                 // The log message text
+  string module = 4;                  // Source module name (optional)
+}
+
+// S3 connection credentials (reusable across requests, no per-request output path)
+message GisS3Config {
+  string bucket = 1;                  // S3 bucket name
+  string endpoint_url = 2;           // S3/MinIO endpoint URL (default "")
+  string region = 3;                  // AWS region (default "us-east-1")
+  string access_key = 4;             // S3 access key (optional)
+  string secret_key = 5;             // S3 secret key (optional)
+  string provider = 6;               // S3 provider: "minio", "aws"
+}
+
+// Mirrors HARMONIZE_PARAMS in the GIS pipeline.
+// All fields optional so unset is distinguishable from proto3 defaults.
+message TerraformConfig {
+  optional bool   terraform                     = 1;
+  optional double pad_radius                    = 2;
+  optional double pre_tessellation_length       = 3;
+  optional bool   pre_smooth_terrain            = 4;
+  optional int32  pre_smooth_iters              = 5;
+  optional double pre_smooth_lambda             = 6;
+  optional bool   terraform_smooth              = 7;
+  optional int32  terraform_smooth_iters        = 8;
+  optional double terraform_smooth_lambda       = 9;
+  optional double terraform_smooth_radius       = 10;
+  optional string building_base_method          = 11;
+  optional double base_merge_distance           = 12;
+  optional double base_influence_radius         = 13;
+  optional double base_influence_sigma          = 14;
+  optional int32  base_smooth_iters             = 15;
+  optional bool   adaptive_bands                = 16;
+  optional double near_radius                   = 17;
+  optional double near_tessellation_threshold   = 18;
+  optional double far_tessellation_threshold    = 19;
+}
+
+// OSM map generation task configuration
+message OSMTaskConfig {
+  string output_folder_key = 1;              // S3 output path: s3://bucket/output_folder_key
+  double min_lon = 2;                          // Bounding box minimum longitude
+  double min_lat = 3;                          // Bounding box minimum latitude
+  double max_lon = 4;                          // Bounding box maximum longitude
+  double max_lat = 5;                          // Bounding box maximum latitude
+  bool include_elevation = 6;                  // Include elevation data
+  bool disable_interiors = 8;                  // Disable building interiors
+  bool rough = 9;                              // Use rough geometry
+  optional string ground_source = 11;
+  string vegetation_source = 12;
+  double vegetation_density = 13;
+  double vegetation_scale_min = 14;
+  double vegetation_scale_max = 15;
+  optional bool cesium3dtiles_b3dm = 17;
+  optional bool cesium3dtiles_draco = 18;
+  optional bool cesium3dtiles_gzip = 19;
+  optional int32 cesium3dtiles_chunk_size = 20;
+  bool cesium3dtiles_veg_instanced = 21;
+  optional TerraformConfig terraform_config = 22;
+  optional double terrain_clip_margin = 23;
+}
+
+// GML map generation task configuration
+message GMLTaskConfig {
+  string output_folder_key = 1;       // S3 output path: s3://bucket/output_folder_key
+  repeated string input_files = 2;    // GML input file paths
+  string epsg_in = 3;                 // Input EPSG code
+  optional string epsg_out = 4;       // Output EPSG code
+  bool rough = 5;                     // Use rough geometry
+  bool include_elevation = 6;         // Include elevation data
+  optional string ground_source = 7;  // Ground source
+  bool disable_interiors = 8;         // Disable building interiors
+  string vegetation_source = 10;
+  double vegetation_density = 11;
+  double vegetation_scale_min = 12;
+  double vegetation_scale_max = 13;
+  optional bool cesium3dtiles_b3dm = 15;
+  optional bool cesium3dtiles_draco = 16;
+  optional bool cesium3dtiles_gzip = 17;
+  optional int32 cesium3dtiles_chunk_size = 18;
+  bool cesium3dtiles_veg_instanced = 19;
+  optional TerraformConfig terraform_config = 20;
+  optional double terrain_clip_margin = 21;
+}
+
+// GIS map preparation request
+message PrepareMapRequest {
+  string task_type = 1;               // "osm" or "gml"
+  GisS3Config s3_config = 2;         // S3 connection credentials
+  string request_id = 3;             // Unique identifier for this request
+  oneof task {
+    OSMTaskConfig osm_task = 4;      // OSM task configuration
+    GMLTaskConfig gml_task = 5;      // GML task configuration
+  }
+}
+
+// GIS map preparation progress (streamed from server)
+// The server yields periodic heartbeat messages while the Temporal workflow runs.
+// The final message has stage="completed" (success=true) or stage="error" (success=false).
+message PrepareMapProgress {
+  float elapsed_seconds = 1;          // Wall-clock time elapsed so far
+  string stage = 2;                   // "processing", "completed", "error"
+  bool success = 3;                   // Final status (meaningful in last message)
+  string message = 4;                 // Human-readable status message
+  string s3_url = 5;                  // S3 URL of the generated map (set when completed)
+  string request_id = 6;             // Echo back the request ID
+}

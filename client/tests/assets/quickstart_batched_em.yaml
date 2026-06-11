@@ -1,0 +1,227 @@
+db:
+  db_author: aerial
+  db_host: clickhouse
+  db_port: 9000
+  opt_in_tables:
+  - telemetry
+  - raypaths
+  - cfrs
+  - cirs
+  opt_in_tables_options:
+    raypaths: full
+  parquet_export:
+    compression: zstd
+    iceberg:
+      catalog_name: default
+      catalog_type: rest
+      catalog_uri: http://nessie:19120/iceberg
+      nessie_ref: main
+    max_workers: 2
+    s3_configs:
+    - access_key: minioadmin
+      bucket: aerial-data
+      endpoint_url: http://minio:9000
+      nodes:
+      - node1
+      provider: minio
+      region: us-east-1
+      secret_key: minioadmin
+      use_ssl: false
+    timesteps_per_file: 5
+    verify_exports: true
+  s3_config:
+    access_key: minioadmin
+    bucket: aerial-data
+    endpoint_url: http://minio:9000
+    provider: minio
+    region: us-east-1
+    secret_key: minioadmin
+  sim_id: quickstart_batched_em
+gis:
+  scene:
+    scene_url: test_data/maps/tokyo
+  vegetation:
+    active: false
+    geojson: []
+sim:
+  DUs:
+    add:
+    - id: 1
+      position:
+        pos:
+          x: 0.0
+          'y': 0.0
+          z: 100.0
+    default: test_data/assets/du.json
+    update:
+    - attributes:
+        aerial_du_fft_size: 4096
+        aerial_du_max_channel_bandwidth: 100.0
+        aerial_du_num_antennas: 4
+        aerial_du_reference_freq: 3600.0
+        aerial_du_subcarrier_spacing: 30.0
+      ids:
+      - 1
+  Materials:
+    default: test_data/assets/materials.json
+  Panels:
+    add:
+    - id: 2
+    - id: 1
+    default: test_data/assets/panel.json
+    update:
+    - attributes:
+        antenna_names:
+        - infinitesimal_dipole
+        - infinitesimal_dipole
+        - infinitesimal_dipole
+        - infinitesimal_dipole
+        antenna_roll_angle_first_polz_degree: 0.0
+        antenna_roll_angle_second_polz_degree: 90.0
+        antenna_spacing_horz_mm: 41.63784138888889
+        antenna_spacing_vert_mm: 41.63784138888889
+        dual_polarized: true
+        num_loc_antenna_horz: 2
+        num_loc_antenna_vert: 1
+        reference_freq_mhz: 3600.0
+      ids:
+      - 2
+    - attributes:
+        antenna_names:
+        - isotropic
+        - isotropic
+        - isotropic
+        - isotropic
+        antenna_roll_angle_first_polz_degree: 0.0
+        antenna_roll_angle_second_polz_degree: 90.0
+        antenna_spacing_horz_mm: 41.63784138888889
+        antenna_spacing_vert_mm: 41.63784138888889
+        dual_polarized: true
+        num_loc_antenna_horz: 2
+        num_loc_antenna_vert: 1
+        reference_freq_mhz: 3600.0
+      ids:
+      - 1
+  RUs:
+    add:
+    - id: 1
+      position:
+        pos:
+          lat: 35.66350010610868
+          lon: 139.74530874157455
+    default: test_data/assets/gnb.json
+    update:
+    - attributes:
+        aerial_gnb_carrier_freq: 3600.0
+        aerial_gnb_du_id: 1
+        aerial_gnb_du_manual_assign: true
+        aerial_gnb_height: 2.5
+        aerial_gnb_mech_azimuth: 60.0
+        aerial_gnb_mech_tilt: 0.0
+        aerial_gnb_panel_type: 2
+        aerial_gnb_radiated_power: 43.0
+      ids:
+      - 1
+  Scatterers:
+    default: test_data/assets/car_small.json
+  Scenario:
+    default: test_data/assets/scenario.json
+    update:
+    - attributes:
+        sim_em_diffuse_type: 0
+        sim_em_interactions: 5
+        sim_em_max_num_paths_per_ant_pair: 500
+        sim_em_rays: 500
+        sim_enable_wideband: true
+        sim_gnb_panel_type: 2
+        sim_is_full: false
+        sim_is_seeded: true
+        sim_simulation_mode: 0
+        sim_duration: 10
+        sim_interval: 1
+        sim_seed: 100
+        sim_ue_max_speed: 2.0
+        sim_ue_min_speed: 2.0
+        sim_ue_panel_type: 1
+  UEs:
+    add:
+    - id: 4
+      waypoints:
+      - arrival_time: -1.0
+        azimuth_offset: 0.0
+        pause_duration: 0.0
+        pos:
+          lat: 35.66257076246533
+          lon: 139.74622671131968
+        speed: 0.0
+    - id: 3
+      waypoints:
+      - arrival_time: -1.0
+        azimuth_offset: 0.0
+        pause_duration: 0.0
+        pos:
+          lat: 35.6629937061716
+          lon: 139.74556239275464
+        speed: 0.0
+    - id: 2
+      waypoints:
+      - arrival_time: -1.0
+        azimuth_offset: 0.0
+        pause_duration: 0.0
+        pos:
+          lat: 35.66363198867132
+          lon: 139.74488214856726
+        speed: 0.0
+    - id: 1
+      waypoints:
+      - arrival_time: -1.0
+        azimuth_offset: 0.0
+        pause_duration: 0.0
+        pos:
+          lat: 35.66273900802609
+          lon: 139.74484583110285
+        speed: 0.0
+    default: test_data/assets/ue.json
+    update:
+    - attributes:
+        aerial_ue_bler_target: 0.1
+        aerial_ue_initial_mech_azimuth: 0.0
+        aerial_ue_manual: true
+        aerial_ue_mech_tilt: 0.0
+        aerial_ue_panel_type: 1
+        aerial_ue_radiated_power: 26.0
+      ids:
+      - 4
+    - attributes:
+        aerial_ue_bler_target: 0.1
+        aerial_ue_initial_mech_azimuth: 0.0
+        aerial_ue_manual: true
+        aerial_ue_mech_tilt: 0.0
+        aerial_ue_panel_type: 1
+        aerial_ue_radiated_power: 26.0
+      ids:
+      - 3
+    - attributes:
+        aerial_ue_bler_target: 0.1
+        aerial_ue_initial_mech_azimuth: 0.0
+        aerial_ue_manual: true
+        aerial_ue_mech_tilt: 0.0
+        aerial_ue_panel_type: 1
+        aerial_ue_radiated_power: 26.0
+      ids:
+      - 2
+    - attributes:
+        aerial_ue_bler_target: 0.1
+        aerial_ue_initial_mech_azimuth: 0.0
+        aerial_ue_manual: true
+        aerial_ue_mech_tilt: 0.0
+        aerial_ue_panel_type: 1
+        aerial_ue_radiated_power: 26.0
+      ids:
+      - 1
+    - attributes:
+        height_m: 2.0
+      ids:
+      - '*'
+  VegetationMaterials:
+    default: test_data/assets/vegetation_materials.json

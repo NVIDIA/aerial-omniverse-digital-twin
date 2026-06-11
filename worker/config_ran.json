@@ -1,0 +1,36 @@
+{
+    "Cyclic prefix": 288,
+    "gNB noise figure": 0.5,
+    "UE noise figure": 0.5,
+    "DL HARQ enabled": 1,
+    "UL HARQ enabled": 1,
+    "TDD patterns":{
+        "1": "DDDSUUDDDD",
+        "2": "DDDDDDDDDD",
+        "3": "UUUUUUUUUU"
+    },
+    "Simulation pattern": 1,
+    "Max scheduled UEs per TTI - dl": 6,
+    "Max scheduled UEs per TTI - ul": 6,
+    "Scheduler Mode": "PF",
+    "Beamformers CSI": "CFR",
+    "MAC CSI": "CFR",
+    "Beamforming Grp Level": "PRBG",
+    "pusch channel estimation": "MMSE",
+    "srs channel estimation": "MMSE",
+    "channel estimation duration": 2,
+    "MCS selection mode": "OLLA",
+    "SRS SNR threshold for MU-MIMO feasibility - dl": -3.0,
+    "SRS SNR threshold for MU-MIMO feasibility - ul": -3.0,
+    "Channel correlation threshold for MU-MIMO grouping - dl": 0.7,
+    "Channel correlation threshold for MU-MIMO grouping - ul": 0.7,
+    "Fixed UE layers - dl": {
+        "Enable fixed layers": 0,
+        "Fixed layers": 2
+    },
+    "Fixed UE layers - ul": {
+        "Enable fixed layers": 0,
+        "Fixed layers": 2
+    },
+    "RX FT filename": ""
+}
