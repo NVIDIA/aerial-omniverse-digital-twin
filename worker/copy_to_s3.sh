@@ -66,16 +66,21 @@ EOF
 chmod 600 "$MC_CONFIG_DIR/config.json"
 
 # Use mc via Docker to avoid requiring a local mc install.
-# The mc config (including credentials) is mounted read-only; no secrets are
-# passed as environment variables or command-line arguments to the container.
+# The minio/mc image entrypoint is "mc", so override it to run a shell.
+# MC_CONFIG_DIR keeps credentials in a host temp dir removed on exit.
+DOCKER_NETWORK=()
+if [[ "${MINIO_ENDPOINT}" =~ localhost|127\.0\.0\.1 ]]; then
+    DOCKER_NETWORK=(--network host)
+fi
+
 docker run --rm \
+    "${DOCKER_NETWORK[@]}" \
+    --user "$(id -u):$(id -g)" \
+    -e MC_CONFIG_DIR=/mc \
+    -e "BUCKET=${BUCKET}" \
+    -e "S3_PREFIX=${S3_PREFIX}" \
+    -v "${MC_CONFIG_DIR}:/mc" \
     -v "${SOURCE_DIR}:/data:ro" \
-    -v "${MC_CONFIG_DIR}:/root/.mc:ro" \
-    -e BUCKET \
-    -e S3_PREFIX \
+    --entrypoint /bin/sh \
     minio/mc:RELEASE.2024-11-17T19-35-25Z \
-    /bin/sh -c '
-        mc mb --ignore-existing "local/$BUCKET" &&
-        mc mirror --overwrite /data "local/$BUCKET/$S3_PREFIX" &&
-        echo Done.
-    '
+    -c 'mc mb --ignore-existing "local/$BUCKET" && mc mirror --overwrite /data "local/$BUCKET/$S3_PREFIX" && echo Done.'
