@@ -117,8 +117,18 @@ cd viewer
 
 # Install dependencies
 npm install
+```
 
-# Start development server
+To build and start the server,
+- For most users
+```bash
+# Start production server
+npm run build
+npm run start
+```
+- For internal developers,
+```bash
+# Start development server, use with caution
 npm run dev
 ```
 

@@ -7,12 +7,10 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { LocationSearch } from "./LocationSearch";
 import { YmlEditor, hasStoredYmlFile, getStoredYmlContent } from "./YmlEditor";
 import {
-  applyYmlConfig,
+  applyYmlContent,
   clearAllEntities,
   initEntitySync,
-  prefetchSceneMetadataFromYmlConfig,
   YML_STORAGE_UPDATED_EVENT,
-  ymlConfigUsesProjectedPositions,
 } from "~/managers/ymlConfigLoader";
 import { layerManager } from "~/managers/layerManager";
 import { useViewerStore } from "~/store/viewerStore";
@@ -34,21 +32,9 @@ export const TopHeader: React.FC = () => {
     if (hasFile) {
       const content = getStoredYmlContent();
       if (content) {
-        // Resolve the scene's CRS before building entities so positions land
-        // in the right place; then apply synchronously.
         (async () => {
           try {
-            try {
-              await prefetchSceneMetadataFromYmlConfig(content);
-            } catch (prefetchError) {
-              if (ymlConfigUsesProjectedPositions(content)) throw prefetchError;
-              console.warn(
-                "[TopHeader] Scene metadata prefetch failed; YAML has no projected positions, applying anyway:",
-                prefetchError,
-              );
-            }
-            // Do not overwrite minio_settings with YML db.* — keep the user's Iceberg fields.
-            applyYmlConfig(content, { preferExistingMinioSettings: true });
+            await applyYmlContent(content);
           } catch (error) {
             console.error(
               "[TopHeader] Failed to apply cached YML config:",
@@ -79,16 +65,7 @@ export const TopHeader: React.FC = () => {
   const handleConfigApply = useCallback((content: string) => {
     (async () => {
       try {
-        try {
-          await prefetchSceneMetadataFromYmlConfig(content);
-        } catch (prefetchError) {
-          if (ymlConfigUsesProjectedPositions(content)) throw prefetchError;
-          console.warn(
-            "[TopHeader] Scene metadata prefetch failed; YAML has no projected positions, applying anyway:",
-            prefetchError,
-          );
-        }
-        applyYmlConfig(content);
+        await applyYmlContent(content);
       } catch (error) {
         console.error("[TopHeader] Failed to apply YML config:", error);
       }
@@ -281,18 +258,7 @@ export const TopHeader: React.FC = () => {
           requestAnimationFrame(async () => {
             try {
               if (content) {
-                // Pre-resolve scene CRS so positionFromLocal sees it.
-                try {
-                  await prefetchSceneMetadataFromYmlConfig(content);
-                } catch (prefetchError) {
-                  if (ymlConfigUsesProjectedPositions(content))
-                    throw prefetchError;
-                  console.warn(
-                    "[TopHeader] Scene metadata prefetch failed; YAML has no projected positions, applying anyway:",
-                    prefetchError,
-                  );
-                }
-                applyYmlConfig(content);
+                await applyYmlContent(content);
               } else {
                 clearAllEntities();
                 layerManager.clearAll();
@@ -320,6 +286,9 @@ export const TopHeader: React.FC = () => {
         }}
         onFileChange={handleYmlFileChange}
         onConfigApply={handleConfigApply}
+        onApplied={() => {
+          ymlSnapshotRef.current = getStoredYmlContent();
+        }}
       />
     </div>
   );

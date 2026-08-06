@@ -251,7 +251,7 @@ export const DistributedUnitProperties: React.FC = () => {
                   </div>
 
                   {/* Position */}
-                  <div className="grid grid-cols-[2fr_2fr_1fr] gap-3">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs text-gray-400 mb-1">
                         Lat [°]
@@ -302,29 +302,6 @@ export const DistributedUnitProperties: React.FC = () => {
                                 ),
                                 du.position.cartographic.latitude,
                                 du.position.cartographic.height,
-                              ),
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-400 mb-1">
-                        Alt [m]
-                      </label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        className="w-full text-xs bg-gray-800 border border-gray-700 rounded px-2 py-1 text-white font-mono"
-                        value={du.position.cartographic.height.toFixed(1)}
-                        onChange={(e) =>
-                          distributedUnitManager.update(du.id, {
-                            position: {
-                              ...du.position,
-                              cartographic: new Cesium.Cartographic(
-                                du.position.cartographic.longitude,
-                                du.position.cartographic.latitude,
-                                Number(e.target.value) || 0,
                               ),
                             },
                           })

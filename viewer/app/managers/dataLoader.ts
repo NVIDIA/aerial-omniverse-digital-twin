@@ -12,6 +12,15 @@ import { minioClient } from "@/services/database";
 import type { QueryResult } from "@/services/database/minioClient";
 import type { DataSourceType } from "@/store/slices/dataSourceSlice";
 import { useViewerStore } from "@/store/viewerStore";
+import { GLOBAL_RAY_BUDGET } from "@/utils/rayBudget";
+
+const RAYPATH_ANT_FILTER =
+  `ru_ant_el = {'1': 0, '2': 0} AND ue_ant_el = {'1': 0, '2': 0}` as const;
+
+export interface DataFetchOptions {
+  where?: string;
+  rayBudget?: number;
+}
 
 /**
  * Fetch data from the active MinIO / Iceberg connection.
@@ -21,16 +30,21 @@ import { useViewerStore } from "@/store/viewerStore";
 export async function fetchFromDataSource(
   tableName: string,
   _database?: string,
+  options?: DataFetchOptions,
 ): Promise<QueryResult> {
   if (minioClient.hasCatalog()) {
-    return await minioClient.queryViaCatalog(
-      tableName,
-      tableName === "raypaths"
-        ? {
-            where: `ru_ant_el = {'1': 0, '2': 0} AND ue_ant_el = {'1': 0, '2': 0}`,
-          }
-        : undefined,
-    );
+    if (tableName !== "raypaths") {
+      return await minioClient.queryViaCatalog(tableName, options);
+    }
+
+    const where = options?.where
+      ? `${RAYPATH_ANT_FILTER} AND (${options.where})`
+      : RAYPATH_ANT_FILTER;
+
+    return await minioClient.queryViaCatalog(tableName, {
+      where,
+      rayBudget: options?.rayBudget ?? GLOBAL_RAY_BUDGET,
+    });
   }
 
   if (tableName === "raypaths") {

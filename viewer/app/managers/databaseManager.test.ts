@@ -37,8 +37,11 @@ vi.mock("./userEquipmentManager", () => ({
 
 vi.mock("./raypathManager", () => ({
   raypathManager: {
-    load: vi.fn(),
+    load: vi.fn(async () => 1),
     clear: vi.fn(),
+    getAll: vi.fn(() => []),
+    setAll: vi.fn(),
+    isBaselineLoadCurrent: vi.fn(() => true),
   },
 }));
 
@@ -69,6 +72,7 @@ vi.mock("@/services/database", () => ({
 }));
 
 const mockSetYmlTimeData = vi.fn();
+const mockTriggerTimelineRefresh = vi.fn();
 
 vi.mock("@/store/viewerStore", () => ({
   useViewerStore: {
@@ -76,6 +80,11 @@ vi.mock("@/store/viewerStore", () => ({
       cesiumViewer: { test: "viewer" },
       dataSourceType: "minio",
       setYmlTimeData: mockSetYmlTimeData,
+      triggerTimelineRefresh: mockTriggerTimelineRefresh,
+      scenarioParams: {
+        maxVisibleRayPaths: 500,
+        raysSparsity: 1,
+      },
     })),
   },
 }));
@@ -210,14 +219,26 @@ describe("DatabaseManager", () => {
       expect(raypathManager.load).toHaveBeenCalledWith("test_db");
     });
 
-    it("should clear ymlTimeData before loading", async () => {
+    it("should refresh the timeline before starting raypath load", async () => {
       manager.setDatabase("test_db");
       vi.mocked(minioClient.isConnected).mockReturnValue(true);
-      mockSetYmlTimeData.mockClear();
+      mockTriggerTimelineRefresh.mockClear();
+
+      const { raypathManager } = await import("./raypathManager");
+      const order: string[] = [];
+      mockTriggerTimelineRefresh.mockImplementation(() => {
+        order.push("timeline");
+      });
+      vi.mocked(raypathManager.load).mockImplementation(async () => {
+        order.push("rays");
+      });
 
       await manager.loadAll();
+      await Promise.resolve();
 
-      expect(mockSetYmlTimeData).toHaveBeenCalledWith(null);
+      expect(mockTriggerTimelineRefresh).toHaveBeenCalled();
+      expect(raypathManager.load).toHaveBeenCalled();
+      expect(order[0]).toBe("timeline");
     });
 
     it("should retry on failure", async () => {

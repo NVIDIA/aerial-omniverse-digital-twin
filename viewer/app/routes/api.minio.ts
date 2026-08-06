@@ -23,6 +23,12 @@ interface ProxyRequest {
   secretKey?: string;
   /** SigV4 region (default: AWS_REGION / AWS_DEFAULT_REGION / us-east-1). MinIO accepts us-east-1. */
   region?: string;
+  /**
+   * When true, a 404 from the target is expected (e.g. probing for an optional
+   * tile layer a dataset does not ship) and is not error-logged. The 404 is
+   * still returned to the caller so it can act on the status.
+   */
+  suppressNotFoundLog?: boolean;
 }
 
 /** Exported for unit tests; validates and canonicalizes proxy target URLs. */
@@ -60,7 +66,14 @@ async function handleRequest(request: Request) {
   }
 
   try {
-    const { url, method = "GET", accessKey, secretKey, region } = body;
+    const {
+      url,
+      method = "GET",
+      accessKey,
+      secretKey,
+      region,
+      suppressNotFoundLog,
+    } = body;
 
     const target = parseProxyTargetUrl(url);
     if ("error" in target) {
@@ -107,19 +120,26 @@ async function handleRequest(request: Request) {
       });
 
       if (!response.ok) {
+        // Expected 404s (e.g. probing for optional tile layers) are not noise.
+        const isExpected404 =
+          suppressNotFoundLog === true && response.status === 404;
         // Get detailed error response from MinIO
         let minioErrorDetails = "";
         try {
           const errorText = await response.text();
           minioErrorDetails = errorText;
-          console.error(
-            `[MinIO Proxy] MinIO returned error (${response.status}):`,
-            errorText,
-          );
+          if (!isExpected404) {
+            console.error(
+              `[MinIO Proxy] MinIO returned error (${response.status}):`,
+              errorText,
+            );
+          }
         } catch {
-          console.error(
-            `[MinIO Proxy] MinIO returned error (${response.status}) - no body`,
-          );
+          if (!isExpected404) {
+            console.error(
+              `[MinIO Proxy] MinIO returned error (${response.status}) - no body`,
+            );
+          }
         }
 
         return Response.json(

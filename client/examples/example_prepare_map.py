@@ -8,6 +8,11 @@ Digital Twin Client - PrepareMap Example
 Demonstrates GIS map generation (OSM / GML) via the DTWorker gRPC service.
 Does NOT require a loaded simulation scenario.
 
+OSM constructs OSMTask with every configurable attribute (binding defaults).
+GML constructs GMLTask with only required fields to show that omitted kwargs
+fall back to defaults. For TerraformConfig nested overrides, see
+example_prepare_map_terraform.py.
+
 Usage:
     python example_prepare_map.py --s3_endpoint http://10.152.138.172:9002
     python example_prepare_map.py --task gml --s3_endpoint http://10.152.138.172:9002
@@ -41,12 +46,28 @@ def main(args: argparse.Namespace):
     )
 
     if args.task == "osm":
+        # Full explicit OSMTask configuration (all attributes from BaseTaskConfig).
         task = OSMTask(
             output_folder_key=args.output_folder_key,
             coords=(args.min_lon, args.min_lat, args.max_lon, args.max_lat),
             include_elevation=False,
+            ground_source="terrarium",
+            vegetation_source="procedural",
+            vegetation_density=50.0,
+            vegetation_scale_min=0.8,
+            vegetation_scale_max=1.2,
+            cesium3dtiles_b3dm=None,
+            cesium3dtiles_draco=None,
+            cesium3dtiles_gzip=None,
+            cesium3dtiles_chunk_size=None,
+            cesium3dtiles_veg_instanced=True,
+            rough=True,
+            disable_interiors=False,
+            terrain_clip_margin=None,
+            terraform_config=None,
         )
     elif args.task == "gml":
+        # Partial config: only required fields; other kwargs use defaults.
         task = GMLTask(
             output_folder_key=args.output_folder_key,
             input_files=args.input_files,

@@ -59,6 +59,34 @@ describe("dataLoader", () => {
       expect(result).toEqual({ data: [{ x: 1 }], rows: 1 });
     });
 
+    it("should query raypaths with an 800 rayBudget when hasCatalog", async () => {
+      vi.mocked(minioClient.hasCatalog).mockReturnValue(true);
+      vi.mocked(minioClient.queryViaCatalog).mockResolvedValue({
+        data: [],
+        rows: 0,
+      });
+      await fetchFromDataSource("raypaths");
+      expect(minioClient.queryViaCatalog).toHaveBeenCalledWith("raypaths", {
+        where: `ru_ant_el = {'1': 0, '2': 0} AND ue_ant_el = {'1': 0, '2': 0}`,
+        rayBudget: 800,
+      });
+    });
+
+    it("should combine a detail time window with the antenna filter", async () => {
+      vi.mocked(minioClient.hasCatalog).mockReturnValue(true);
+      vi.mocked(minioClient.queryViaCatalog).mockResolvedValue({
+        data: [],
+        rows: 0,
+      });
+      await fetchFromDataSource("raypaths", "db", {
+        where: "time_idx BETWEEN 2 AND 8",
+        rayBudget: 1300,
+      });
+      expect(minioClient.queryViaCatalog).toHaveBeenCalledWith("raypaths", {
+        where: `ru_ant_el = {'1': 0, '2': 0} AND ue_ant_el = {'1': 0, '2': 0} AND (time_idx BETWEEN 2 AND 8)`,
+        rayBudget: 1300,
+      });
+    });
     it("should use fetchRaypathsSharded for raypaths in legacy mode", async () => {
       vi.mocked(minioClient.hasCatalog).mockReturnValue(false);
       vi.mocked(minioClient.fetchRaypathsSharded).mockResolvedValue({

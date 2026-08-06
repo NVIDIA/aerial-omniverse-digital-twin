@@ -24,6 +24,20 @@ export interface CameraState {
 }
 
 /**
+ * Runtime availability of a tileset's source (probed via a HEAD request before load):
+ * - "checking": probe in flight
+ * - "available": source responded OK, safe to load
+ * - "missing": source returned 404 (e.g. a layer this dataset does not ship, by design)
+ * - "unknown": probe could not determine availability (network/other error) — load is still attempted
+ * This is a transient/runtime value and is not persisted to localStorage.
+ */
+export type TilesetAvailability =
+  | "checking"
+  | "available"
+  | "missing"
+  | "unknown";
+
+/**
  * Tileset configuration interface for 3D building tiles
  */
 export interface TilesetConfig {
@@ -36,6 +50,8 @@ export interface TilesetConfig {
   selectable?: boolean;
   style?: object;
   colorBlendMode?: "REPLACE" | "MIX" | "HIGHLIGHT";
+  // Runtime availability of the tileset source (not persisted)
+  availability?: TilesetAvailability;
   // Optional center coordinates for distance-based loading
   center?: {
     longitude: number;

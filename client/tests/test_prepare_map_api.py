@@ -33,7 +33,7 @@ def test_osm_task_defaults_match_gis() -> None:
     assert t.vegetation_scale_min == pytest.approx(0.8)
     assert t.vegetation_scale_max == pytest.approx(1.2)
     # cesium3dtiles_{b3dm,draco,gzip} default to None so asim_gis applies its
-    # own defaults (b3dm=True, draco=False, gzip=True).
+    # own defaults (b3dm=False, draco=True, gzip=True).
     assert t.cesium3dtiles_b3dm is None
     assert t.cesium3dtiles_draco is None
     assert t.cesium3dtiles_gzip is None

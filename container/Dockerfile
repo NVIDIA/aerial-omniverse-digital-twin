@@ -7,7 +7,7 @@ RUN apt-get update -qq && \
         libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
         libucx-dev \
         python3 python3-pip python3-pytest && \
-    pip install build twine pybind11 omegaconf fire numpy sphinx sphinx-rtd-theme --quiet --break-system-packages && \
+    pip install build twine pybind11 omegaconf fire numpy sphinx sphinx-rtd-theme --quiet --break-system-packages --ignore-installed packaging && \
     rm -rf /var/lib/apt/lists/*
 
 # Rename the existing ubuntu user/group (UID/GID 1000) to aerial

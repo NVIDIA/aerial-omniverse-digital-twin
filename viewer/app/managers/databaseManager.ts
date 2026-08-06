@@ -75,7 +75,9 @@ export class DatabaseManager {
   }
 
   async loadRaypaths(): Promise<void> {
-    await raypathManager.load(this.database || "");
+    const generation = await raypathManager.load(this.database || "");
+    if (!raypathManager.isBaselineLoadCurrent(generation)) return;
+
     const { maxVisibleRayPaths, raysSparsity } =
       useViewerStore.getState().scenarioParams;
     let rays = raypathManager.getAll();
@@ -102,6 +104,7 @@ export class DatabaseManager {
     }
 
     if (raysSparsity > 1 || maxVisibleRayPaths > 0) {
+      if (!raypathManager.isBaselineLoadCurrent(generation)) return;
       raypathManager.setAll(rays);
     }
   }
@@ -149,8 +152,7 @@ export class DatabaseManager {
     this.setDatabase(minioDb);
 
     try {
-      const { setYmlTimeData } = useViewerStore.getState();
-      setYmlTimeData(null);
+      const { triggerTimelineRefresh } = useViewerStore.getState();
 
       await this.loadScenario();
       await this.loadPanels();
@@ -159,14 +161,14 @@ export class DatabaseManager {
       await this.loadScatterers();
       await this.loadUserEquipments();
 
-      try {
-        await this.loadRaypaths();
-      } catch (raypathError) {
+      triggerTimelineRefresh();
+
+      void this.loadRaypaths().catch((raypathError) => {
         console.warn(
           "[DatabaseManager] Raypath loading failed, but continuing with other data:",
           raypathError,
         );
-      }
+      });
       return;
     } catch (error) {
       if (retryCount < 1) {

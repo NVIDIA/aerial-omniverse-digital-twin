@@ -16,6 +16,12 @@ vi.mock("./dataLoader", () => ({
   fetchFromDataSource: vi.fn(),
 }));
 
+vi.mock("@/services/database", () => ({
+  minioClient: {
+    hasCatalog: vi.fn(() => false),
+  },
+}));
+
 function makeRaypath(overrides: Partial<Raypath> = {}): Raypath {
   return {
     time_idx: 0,
@@ -457,8 +463,111 @@ describe("RaypathManager", () => {
 
       await manager.load("test_db");
       const ray = manager.getAll()[0];
-      // power = 10 * log10(1^2 + 0^2) = 0 dB
-      expect(ray.power_dB).toBeCloseTo(0, 1);
+      // power = 10 * log10(1^2 + 0^2) + 30 = 30 dBm
+      expect(ray.power_dB).toBeCloseTo(30, 1);
+    });
+
+    it("should ignore a stale baseline load that finishes after a newer one", async () => {
+      const { fetchFromDataSource } = await import("./dataLoader");
+
+      let resolveFirst!: (value: any) => void;
+      const first = new Promise((resolve) => {
+        resolveFirst = resolve;
+      });
+
+      vi.mocked(fetchFromDataSource)
+        .mockImplementationOnce(() => first as any)
+        .mockResolvedValueOnce({
+          data: [
+            {
+              time_idx: 1,
+              ru_id: 2,
+              ue_id: 2,
+              points: [
+                { "1": 0, "2": 0, "3": 0 },
+                { "1": 9, "2": 9, "3": 9 },
+              ],
+              power_dB: -20,
+            },
+          ],
+          rows: 1,
+        });
+
+      const firstLoad = manager.load("db_old");
+      const secondGen = await manager.load("db_new");
+      expect(manager.isBaselineLoadCurrent(secondGen)).toBe(true);
+      expect(manager.getAll()[0].ru_id).toBe(2);
+
+      resolveFirst({
+        data: [
+          {
+            time_idx: 0,
+            ru_id: 1,
+            ue_id: 1,
+            points: [
+              { "1": 0, "2": 0, "3": 0 },
+              { "1": 1, "2": 1, "3": 1 },
+            ],
+            power_dB: -50,
+          },
+        ],
+        rows: 1,
+      });
+      const firstGen = await firstLoad;
+      expect(manager.isBaselineLoadCurrent(firstGen)).toBe(false);
+      expect(manager.getAll()[0].ru_id).toBe(2);
+    });
+  });
+
+  describe("detail window", () => {
+    it("merges detail rays onto the baseline and clears them", async () => {
+      const { fetchFromDataSource } = await import("./dataLoader");
+      const { minioClient } = await import("@/services/database");
+      vi.mocked(minioClient.hasCatalog).mockReturnValue(true);
+
+      vi.mocked(fetchFromDataSource).mockResolvedValue({
+        data: [
+          {
+            time_idx: 5,
+            ru_id: 1,
+            ue_id: 1,
+            points: [
+              { "1": 0, "2": 0, "3": 0 },
+              { "1": 1, "2": 1, "3": 1 },
+            ],
+            power_dB: -10,
+          },
+        ],
+        rows: 1,
+      });
+      await manager.load("db");
+      expect(manager.getAll()).toHaveLength(1);
+
+      vi.mocked(fetchFromDataSource).mockResolvedValue({
+        data: [
+          {
+            time_idx: 5,
+            ru_id: 1,
+            ue_id: 2,
+            points: [
+              { "1": 0, "2": 0, "3": 0 },
+              { "1": 2, "2": 2, "3": 2 },
+            ],
+            power_dB: -40,
+          },
+        ],
+        rows: 1,
+      });
+
+      await manager.loadDetailWindow(5);
+      expect(manager.getAll()).toHaveLength(2);
+      expect(fetchFromDataSource).toHaveBeenLastCalledWith("raypaths", "db", {
+        where: "time_idx BETWEEN 2 AND 8",
+        rayBudget: 500 + 800,
+      });
+
+      manager.clearDetail();
+      expect(manager.getAll()).toHaveLength(1);
     });
   });
 });

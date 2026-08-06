@@ -28,6 +28,8 @@ vi.mock("js-yaml", () => ({
 // Mock ymlConfigLoader to avoid pulling in Cesium
 vi.mock("~/managers/ymlConfigLoader", () => ({
   YML_STORAGE_UPDATED_EVENT: "yml-storage-updated",
+  SIMULATION_LOADED_EVENT: "simulation-loaded",
+  applyAndLoadSimulation: vi.fn(),
 }));
 
 const VALID_YAML = `db:

@@ -423,7 +423,7 @@ PYBIND11_MODULE(dt_client, m) {
       .def_readwrite("vegetation_scale_max", &OSMTask::vegetation_scale_max,
                      "Maximum random scale for procedural vegetation.")
       .def_readwrite("cesium3dtiles_b3dm", &OSMTask::cesium3dtiles_b3dm,
-                     "Emit B3DM tiles instead of GLB.")
+                     "Emit legacy B3DM tiles instead of the default GLB.")
       .def_readwrite("cesium3dtiles_draco", &OSMTask::cesium3dtiles_draco,
                      "Apply Draco mesh compression to GLB tiles. Requires "
                      "cesium3dtiles_b3dm=false; auto-enabled when b3dm=false "
@@ -547,7 +547,7 @@ PYBIND11_MODULE(dt_client, m) {
       .def_readwrite("vegetation_scale_max", &GMLTask::vegetation_scale_max,
                      "Maximum random scale for procedural vegetation.")
       .def_readwrite("cesium3dtiles_b3dm", &GMLTask::cesium3dtiles_b3dm,
-                     "Emit B3DM tiles instead of GLB.")
+                     "Emit legacy B3DM tiles instead of the default GLB.")
       .def_readwrite("cesium3dtiles_draco", &GMLTask::cesium3dtiles_draco,
                      "Apply Draco mesh compression to GLB tiles. Requires "
                      "cesium3dtiles_b3dm=false; auto-enabled when b3dm=false "

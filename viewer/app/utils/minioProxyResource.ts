@@ -8,6 +8,7 @@
  * (browser GETs to MinIO are blocked by CORS). Anonymous proxy works for public buckets;
  * when MinIO settings include access/secret keys, the proxy signs with AWS SigV4 for private buckets.
  */
+import type { TilesetAvailability } from "@/types";
 import { normalizeS3EndpointForTiles } from "./gisTilesets";
 
 const MINIO_SETTINGS_KEY = "minio_settings";
@@ -78,6 +79,48 @@ export function shouldProxyTileUrlToMinio(
     return false;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Preflight-probe a tileset source via a same-origin HEAD to /api/minio, so the
+ * viewer can avoid trying to load (and repeatedly 404-ing on) layers a dataset
+ * does not ship. Returns:
+ * - "available" when the source responds OK
+ * - "missing" on a 404 (the layer is genuinely absent, e.g. by design)
+ * - "unknown" on any other error (network/500/etc.) so the caller still attempts a load
+ *
+ * `suppressNotFoundLog` is sent so the proxy does not error-log the expected 404.
+ */
+export async function probeTilesetAvailability(
+  url: string,
+): Promise<TilesetAvailability> {
+  if (typeof window === "undefined") return "unknown";
+  if (!/^https?:\/\//i.test(url)) return "unknown";
+
+  try {
+    const body: Record<string, string | boolean> = {
+      url,
+      method: "HEAD",
+      suppressNotFoundLog: true,
+    };
+    const creds = readMinioProxyCredentialsFromStorage();
+    if (creds) {
+      body.accessKey = creds.accessKey;
+      body.secretKey = creds.secretKey;
+    }
+
+    const response = await fetch("/api/minio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (response.ok) return "available";
+    if (response.status === 404) return "missing";
+    return "unknown";
+  } catch {
+    return "unknown";
   }
 }
 

@@ -10,6 +10,14 @@ import {
   type RaypathFilterState,
 } from "@/store/utils/localStorage";
 import { fetchFromDataSource } from "./dataLoader";
+import { minioClient } from "@/services/database";
+import {
+  DETAIL_RAY_BUDGET,
+  DETAIL_TIMESTEP_RADIUS,
+  GLOBAL_RAY_BUDGET,
+  selectDetailRays,
+  selectRaysForBudget,
+} from "@/utils/rayBudget";
 
 type Subscriber = (raypaths: Raypath[]) => void;
 type FilterSubscriber = (filters: RaypathFilterState) => void;
@@ -19,7 +27,12 @@ type FilterSubscriber = (filters: RaypathFilterState) => void;
  * Handles loading raypath data from the database and managing state
  */
 class RaypathManager {
+  /** Published union of baseline + detail (what layers subscribe to). */
   private raypaths: Raypath[] = [];
+  private baselineRays: Raypath[] = [];
+  private detailRays: Raypath[] = [];
+  private detailGeneration = 0;
+  private baselineLoadGeneration = 0;
   private subscribers: Set<Subscriber> = new Set();
   private filterSubscribers: Set<FilterSubscriber> = new Set();
 
@@ -35,10 +48,6 @@ class RaypathManager {
   // Available IDs (populated after loading)
   private availableRuIds: Set<number> = new Set();
   private availableUeIds: Set<number> = new Set();
-
-  // Performance settings
-  private maxRaysToLoad: number = 50000; // Maximum rays to load before sampling
-
   /**
    * Subscribe to state changes
    */
@@ -252,20 +261,32 @@ class RaypathManager {
   }
 
   /**
-   * Set all raypaths (replaces existing)
+   * Replace baseline rays (clears any detail window).
    */
   setAll(raypaths: Raypath[]): void {
-    this.raypaths = [...raypaths];
+    this.baselineRays = [...raypaths];
+    this.detailRays = [];
+    this.detailGeneration += 1;
+    this.publishMerged();
+  }
 
-    // Extract available RU and UE IDs
+  clearDetail(): void {
+    this.detailGeneration += 1;
+    if (this.detailRays.length === 0) return;
+    this.detailRays = [];
+    this.publishMerged();
+  }
+
+  private publishMerged(): void {
+    this.raypaths = [...this.baselineRays, ...this.detailRays];
+
     this.availableRuIds.clear();
     this.availableUeIds.clear();
-    for (const raypath of raypaths) {
+    for (const raypath of this.raypaths) {
       this.availableRuIds.add(raypath.ru_id);
       this.availableUeIds.add(raypath.ue_id);
     }
 
-    // Load filters after we know available IDs
     this.loadFilters();
     this.notify();
   }
@@ -274,187 +295,203 @@ class RaypathManager {
    * Clear all raypaths
    */
   clear(): void {
+    this.baselineLoadGeneration += 1;
+    this.baselineRays = [];
+    this.detailRays = [];
+    this.detailGeneration += 1;
     this.raypaths = [];
     this.availableRuIds.clear();
     this.availableUeIds.clear();
     this.notify();
   }
 
+  isBaselineLoadCurrent(generation: number): boolean {
+    return generation === this.baselineLoadGeneration;
+  }
+
+  /**
+   * Load denser rays for centerTimeIdx ± radius when the timeline is stopped.
+   */
+  async loadDetailWindow(
+    centerTimeIdx: number,
+    radius: number = DETAIL_TIMESTEP_RADIUS,
+    budget: number = DETAIL_RAY_BUDGET,
+  ): Promise<void> {
+    if (!minioClient.hasCatalog() || !this.currentDatabase) return;
+
+    const generation = ++this.detailGeneration;
+    const tMin = centerTimeIdx - radius;
+    const tMax = centerTimeIdx + radius;
+
+    try {
+      const result = await fetchFromDataSource(
+        "raypaths",
+        this.currentDatabase,
+        {
+          where: `time_idx BETWEEN ${tMin} AND ${tMax}`,
+          // Extra headroom so we still have ~budget after excluding baseline.
+          rayBudget: budget + GLOBAL_RAY_BUDGET,
+        },
+      );
+
+      if (generation !== this.detailGeneration) return;
+
+      if (result.error || !result.data?.length) {
+        this.detailRays = [];
+        this.publishMerged();
+        return;
+      }
+
+      const processed = this.processRawRows(result.data);
+      const detail = selectDetailRays(processed, this.baselineRays, budget);
+
+      if (generation !== this.detailGeneration) return;
+
+      this.detailRays = detail;
+      this.publishMerged();
+    } catch (error) {
+      if (generation !== this.detailGeneration) return;
+      console.error("[RaypathManager] Detail window load failed:", error);
+    }
+  }
+
+  private processRawRows(data: any[]): Raypath[] {
+    const toNumber = (val: any): number => {
+      if (typeof val === "number") return val;
+      if (typeof val === "bigint") return Number(val);
+      const num = Number(val);
+      return isNaN(num) ? 0 : num;
+    };
+
+    const normalizePoint = (point: any): number[] => {
+      if (!point) return [0, 0, 0];
+      if (Array.isArray(point)) {
+        return [toNumber(point[0]), toNumber(point[1]), toNumber(point[2])];
+      }
+      if (typeof point === "object") {
+        if ("1" in point) {
+          return [
+            toNumber(point["1"]),
+            toNumber(point["2"]),
+            toNumber(point["3"]),
+          ];
+        }
+        if ("0" in point) {
+          return [
+            toNumber(point["0"]),
+            toNumber(point["1"]),
+            toNumber(point["2"]),
+          ];
+        }
+        if ("x" in point) {
+          return [toNumber(point.x), toNumber(point.y), toNumber(point.z)];
+        }
+      }
+      const arr = Array.from(point);
+      return [toNumber(arr[0]), toNumber(arr[1]), toNumber(arr[2])];
+    };
+
+    const computePowerDbm = (row: any): number => {
+      const powerDb = row.power_dB ?? row.power_db;
+      if (powerDb !== undefined && powerDb !== null) {
+        return toNumber(powerDb);
+      }
+      const amplReArray = Array.isArray(row.ampl_re)
+        ? row.ampl_re
+        : Array.from(row.ampl_re || []);
+      const amplImArray = Array.isArray(row.ampl_im)
+        ? row.ampl_im
+        : Array.from(row.ampl_im || []);
+      const amplRe = Number(amplReArray[0] ?? 0);
+      const amplIm = Number(amplImArray[0] ?? 0);
+      const tapPower = amplRe * amplRe + amplIm * amplIm;
+      return tapPower > 0 ? 10 * Math.log10(tapPower) + 30 : -200;
+    };
+
+    const firstRowPoints = data[0]?.points;
+    const isCompleteRayFormat =
+      Array.isArray(firstRowPoints) &&
+      firstRowPoints.length >= 2 &&
+      typeof firstRowPoints[0] === "object" &&
+      !Array.isArray(firstRowPoints[0]);
+
+    let processedData: Raypath[];
+
+    if (isCompleteRayFormat) {
+      processedData = [];
+      for (const row of data) {
+        const points = Array.isArray(row.points)
+          ? row.points.map(normalizePoint)
+          : [normalizePoint(row.points)];
+        if (points.length < 2) continue;
+        processedData.push({
+          time_idx: toNumber(row.time_idx),
+          ru_id: toNumber(row.ru_id),
+          ue_id: toNumber(row.ue_id),
+          points,
+          power_dB: computePowerDbm(row),
+        });
+      }
+    } else {
+      const raypathMap = new Map<string, Raypath>();
+      for (const row of data) {
+        const key = `${row.ru_id}-${row.ue_id}-${row.time_idx}`;
+        const singlePoint =
+          Array.isArray(row.points) && row.points.length > 0
+            ? normalizePoint(row.points[0])
+            : normalizePoint(row.points);
+        if (!raypathMap.has(key)) {
+          raypathMap.set(key, {
+            time_idx: toNumber(row.time_idx),
+            ru_id: toNumber(row.ru_id),
+            ue_id: toNumber(row.ue_id),
+            points: [],
+            power_dB: computePowerDbm(row),
+          });
+        }
+        raypathMap.get(key)!.points.push(singlePoint);
+      }
+      processedData = Array.from(raypathMap.values());
+    }
+
+    return processedData.filter((r) => r.points.length >= 2);
+  }
+
   /**
    * Load raypaths from MinIO / Iceberg (Parquet or catalog query).
+   * Returns the load generation so callers can ignore stale completions.
    */
-  async load(database: string): Promise<void> {
+  async load(database: string): Promise<number> {
+    const generation = ++this.baselineLoadGeneration;
     this.currentDatabase = database;
 
     try {
       const result = await fetchFromDataSource("raypaths", database);
 
+      if (generation !== this.baselineLoadGeneration) return generation;
+
       if (result.error) {
         console.error("[RaypathManager] MinIO load error:", result.error);
-        return;
+        return generation;
       }
 
       if (!result.data || result.data.length === 0) {
-        return;
+        if (generation !== this.baselineLoadGeneration) return generation;
+        this.setAll([]);
+        return generation;
       }
 
-      // Helper to convert to number
-      const toNumber = (val: any): number => {
-        if (typeof val === "number") return val;
-        if (typeof val === "bigint") return Number(val);
-        const num = Number(val);
-        return isNaN(num) ? 0 : num;
-      };
-
-      // Normalize a single point [x, y, z]
-      // Handles multiple formats:
-      //   - Array: [x, y, z]
-      //   - DuckDB/Iceberg struct (1-indexed): {"1": x, "2": y, "3": z}
-      //   - DuckDB/Iceberg struct (0-indexed): {"0": x, "1": y, "2": z}
-      //   - Named keys: {x, y, z}
-      const normalizePoint = (point: any): number[] => {
-        if (!point) return [0, 0, 0];
-        if (Array.isArray(point)) {
-          return [toNumber(point[0]), toNumber(point[1]), toNumber(point[2])];
-        }
-        if (typeof point === "object") {
-          // DuckDB/Iceberg struct with 1-indexed string keys: {"1": x, "2": y, "3": z}
-          if ("1" in point) {
-            return [
-              toNumber(point["1"]),
-              toNumber(point["2"]),
-              toNumber(point["3"]),
-            ];
-          }
-          // 0-indexed string keys: {"0": x, "1": y, "2": z}
-          if ("0" in point) {
-            return [
-              toNumber(point["0"]),
-              toNumber(point["1"]),
-              toNumber(point["2"]),
-            ];
-          }
-          // Named keys: {x, y, z}
-          if ("x" in point) {
-            return [toNumber(point.x), toNumber(point.y), toNumber(point.z)];
-          }
-        }
-        // Fallback for typed arrays or other iterables
-        const arr = Array.from(point);
-        return [toNumber(arr[0]), toNumber(arr[1]), toNumber(arr[2])];
-      };
-
-      // Helper to compute power in dBm from amplitude columns when not provided
-      const computePowerDbm = (row: any): number => {
-        const powerDb = row.power_dB ?? row.power_db;
-        if (powerDb !== undefined && powerDb !== null) {
-          return toNumber(powerDb);
-        }
-        // Calculate from ampl_re and ampl_im
-        const amplReArray = Array.isArray(row.ampl_re)
-          ? row.ampl_re
-          : Array.from(row.ampl_re || []);
-        const amplImArray = Array.isArray(row.ampl_im)
-          ? row.ampl_im
-          : Array.from(row.ampl_im || []);
-        const amplRe = Number(amplReArray[0] ?? 0);
-        const amplIm = Number(amplImArray[0] ?? 0);
-        const tapPower = amplRe * amplRe + amplIm * amplIm;
-        return tapPower > 0 ? 10 * Math.log10(tapPower) + 30 : -200;
-      };
-
-      // Detect data format:
-      //   Iceberg/DuckDB: each row is a complete ray, points is an array of structs
-      //     e.g. points: [{"1": x1, "2": y1, "3": z1}, {"1": x2, "2": y2, "3": z2}]
-      //   Legacy parquet: each row is a single point, rows are grouped by (ru_id, ue_id, time_idx)
-      const firstRowPoints = result.data[0].points;
-      const isCompleteRayFormat =
-        Array.isArray(firstRowPoints) &&
-        firstRowPoints.length >= 2 &&
-        typeof firstRowPoints[0] === "object" &&
-        !Array.isArray(firstRowPoints[0]);
-
-      let processedData: {
-        time_idx: number;
-        ru_id: number;
-        ue_id: number;
-        points: number[][];
-        power_dB: number;
-      }[];
-
-      if (isCompleteRayFormat) {
-        // ── Iceberg format: each row is a complete ray ──
-        // Normalize all points in each row's points array
-        processedData = [];
-
-        for (const row of result.data) {
-          const points = Array.isArray(row.points)
-            ? row.points.map(normalizePoint)
-            : [normalizePoint(row.points)];
-
-          if (points.length < 2) continue;
-
-          processedData.push({
-            time_idx: toNumber(row.time_idx),
-            ru_id: toNumber(row.ru_id),
-            ue_id: toNumber(row.ue_id),
-            points,
-            power_dB: computePowerDbm(row),
-          });
-        }
-      } else {
-        // ── Legacy parquet format: each row = one point, group by key ──
-        const raypathMap = new Map<
-          string,
-          {
-            time_idx: number;
-            ru_id: number;
-            ue_id: number;
-            points: number[][];
-            power_dB: number;
-          }
-        >();
-
-        for (const row of result.data) {
-          const key = `${row.ru_id}-${row.ue_id}-${row.time_idx}`;
-
-          const singlePoint =
-            Array.isArray(row.points) && row.points.length > 0
-              ? normalizePoint(row.points[0])
-              : normalizePoint(row.points);
-
-          if (!raypathMap.has(key)) {
-            raypathMap.set(key, {
-              time_idx: toNumber(row.time_idx),
-              ru_id: toNumber(row.ru_id),
-              ue_id: toNumber(row.ue_id),
-              points: [],
-              power_dB: computePowerDbm(row),
-            });
-          }
-
-          raypathMap.get(key)!.points.push(singlePoint);
-        }
-
-        processedData = Array.from(raypathMap.values());
-      }
-
-      // Filter out raypaths with less than 2 points
-      const validRaypaths = processedData.filter((r) => r.points.length >= 2);
-      const invalidCount = processedData.length - validRaypaths.length;
-
-      if (invalidCount > 0) {
-        console.warn(
-          `[RaypathManager] Filtered out ${invalidCount} raypaths with < 2 points`,
-        );
-      }
-
-      this.setAll(validRaypaths as Raypath[]);
+      const validRaypaths = this.processRawRows(result.data);
+      const budgeted = selectRaysForBudget(validRaypaths, GLOBAL_RAY_BUDGET);
+      if (generation !== this.baselineLoadGeneration) return generation;
+      this.setAll(budgeted);
+      return generation;
     } catch (error) {
       console.error(
         "[RaypathManager] Failed to load raypaths from MinIO:",
         error,
       );
+      return generation;
     }
   }
 }

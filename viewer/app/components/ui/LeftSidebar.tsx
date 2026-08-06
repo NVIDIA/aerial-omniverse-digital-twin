@@ -35,7 +35,20 @@ export const LeftSidebar: React.FC = () => {
         primitive.resource?.url?.includes(urlIdentifier),
     );
     if (loadedTileset) {
-      cesiumViewer.flyTo(loadedTileset, { duration: 2.0 });
+      // Fly to the bounding sphere rather than the tileset object: passing the
+      // tileset to viewer.flyTo makes it the Viewer's zoom target, which
+      // _postRender dereferences each frame until the flight ends. If the
+      // tileset is unloaded mid-flight Cesium crashes reading 'updateTransform'.
+      try {
+        const boundingSphere = loadedTileset.boundingSphere;
+        if (boundingSphere) {
+          cesiumViewer.camera.flyToBoundingSphere(boundingSphere, {
+            duration: 2.0,
+          });
+        }
+      } catch (e) {
+        console.warn("[LeftSidebar] Failed to fly to tileset bounds:", e);
+      }
     }
   };
 
@@ -141,78 +154,128 @@ export const LeftSidebar: React.FC = () => {
               })()}
             </div>
             <div className="text-xs text-gray-400 mb-2">
-              {tilesets.filter((t) => t.enabled).length} of {tilesets.length}{" "}
-              layers enabled
+              {(() => {
+                const available = tilesets.filter(
+                  (t) => t.availability !== "missing",
+                );
+                const enabledCount = available.filter((t) => t.enabled).length;
+                const missingCount = tilesets.length - available.length;
+                return (
+                  <>
+                    {enabledCount} of {available.length} layers enabled
+                    {missingCount > 0 && (
+                      <span className="text-gray-500">
+                        {" "}
+                        &middot; {missingCount}{" "}
+                        {missingCount === 1 ? "layer" : "layers"} not available
+                      </span>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {[...tilesets]
               .sort((a, b) => b.priority - a.priority)
-              .map((tileset) => (
-                <div
-                  key={tileset.id}
-                  className="flex items-center justify-between py-1 px-2 hover:bg-gray-700 rounded"
-                >
-                  <div className="flex items-center gap-2 flex-1">
-                    <button
-                      onClick={() => toggleTileset(tileset.id)}
-                      className={`w-4 h-4 rounded border-2 flex items-center justify-center ${
-                        tileset.enabled
-                          ? "bg-green-500 border-green-500"
-                          : "border-gray-500 hover:border-gray-400"
-                      }`}
-                    >
-                      {tileset.enabled && (
+              .map((tileset) => {
+                const isMissing = tileset.availability === "missing";
+                const isChecking = tileset.availability === "checking";
+                const toggleDisabled = isMissing || isChecking;
+                return (
+                  <div
+                    key={tileset.id}
+                    className={`flex items-center justify-between py-1 px-2 rounded ${
+                      isMissing ? "opacity-60" : "hover:bg-gray-700"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 flex-1">
+                      <button
+                        onClick={() => toggleTileset(tileset.id)}
+                        disabled={toggleDisabled}
+                        title={
+                          isMissing
+                            ? "Layer not available"
+                            : isChecking
+                              ? "Checking availability…"
+                              : `Toggle ${tileset.name}`
+                        }
+                        className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 ${
+                          toggleDisabled
+                            ? "border-gray-700 cursor-not-allowed"
+                            : tileset.enabled
+                              ? "bg-green-500 border-green-500"
+                              : "border-gray-500 hover:border-gray-400"
+                        }`}
+                      >
+                        {tileset.enabled && !toggleDisabled && (
+                          <svg
+                            className="w-3 h-3 text-white"
+                            fill="currentColor"
+                            viewBox="0 0 20 20"
+                          >
+                            <path
+                              fillRule="evenodd"
+                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                              clipRule="evenodd"
+                            ></path>
+                          </svg>
+                        )}
+                      </button>
+
+                      <div className="flex-1 min-w-0">
+                        <div
+                          className={`text-xs ${
+                            isMissing ? "text-gray-500" : "text-white"
+                          }`}
+                        >
+                          {tileset.name}
+                        </div>
+                        {isMissing && (
+                          <div className="text-[10px] text-gray-500">
+                            Layer not available
+                          </div>
+                        )}
+                        {isChecking && (
+                          <div className="text-[10px] text-gray-500">
+                            Checking…
+                          </div>
+                        )}
+                      </div>
+
+                      <button
+                        onClick={() => handleZoomToTileset(tileset)}
+                        disabled={!tileset.url || isMissing}
+                        className={`p-1 rounded transition-colors ${
+                          tileset.url && !isMissing
+                            ? "text-gray-400 hover:text-blue-400 hover:bg-gray-600"
+                            : "text-gray-600 cursor-not-allowed opacity-50"
+                        }`}
+                        title={`Zoom to ${tileset.name}`}
+                      >
                         <svg
-                          className="w-3 h-3 text-white"
-                          fill="currentColor"
-                          viewBox="0 0 20 20"
+                          className="w-4 h-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
                         >
                           <path
-                            fillRule="evenodd"
-                            d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                            clipRule="evenodd"
-                          ></path>
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
+                          />
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"
+                          />
                         </svg>
-                      )}
-                    </button>
-
-                    <div className="flex-1">
-                      <div className="text-white text-xs">{tileset.name}</div>
+                      </button>
                     </div>
-
-                    <button
-                      onClick={() => handleZoomToTileset(tileset)}
-                      disabled={!tileset.url}
-                      className={`p-1 rounded transition-colors ${
-                        tileset.url
-                          ? "text-gray-400 hover:text-blue-400 hover:bg-gray-600"
-                          : "text-gray-600 cursor-not-allowed opacity-50"
-                      }`}
-                      title={`Zoom to ${tileset.name}`}
-                    >
-                      <svg
-                        className="w-4 h-4"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
-                        />
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"
-                        />
-                      </svg>
-                    </button>
                   </div>
-                </div>
-              ))}
+                );
+              })}
           </div>
         )}
       </div>
