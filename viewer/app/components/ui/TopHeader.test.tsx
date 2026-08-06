@@ -17,19 +17,30 @@ vi.mock("./LocationSearch", () => ({
 }));
 
 // Mock ymlConfigLoader to avoid pulling in Cesium and all managers
-vi.mock("~/managers/ymlConfigLoader", () => ({
-  applyYmlConfig: vi.fn(() => ({
+vi.mock("~/managers/ymlConfigLoader", () => {
+  const applyYmlConfig = vi.fn((_content?: string) => ({
     distributedUnits: 0,
     panels: 0,
     radioUnits: 0,
     userEquipments: 0,
+    scatterers: 0,
     scenarioUpdated: false,
     timeIndices: 0,
-  })),
-  clearAllEntities: vi.fn(),
-  initEntitySync: vi.fn(),
-  YML_STORAGE_UPDATED_EVENT: "yml-storage-updated",
-}));
+  }));
+
+  return {
+    applyYmlConfig,
+    applyYmlContent: vi.fn((content) => {
+      applyYmlConfig(content);
+      return Promise.resolve();
+    }),
+    clearAllEntities: vi.fn(),
+    initEntitySync: vi.fn(),
+    prefetchSceneMetadataFromYmlConfig: vi.fn(() => Promise.resolve()),
+    ymlConfigUsesProjectedPositions: vi.fn(() => false),
+    YML_STORAGE_UPDATED_EVENT: "yml-storage-updated",
+  };
+});
 
 // Mock YmlEditor so we can control its behavior and avoid js-yaml import
 vi.mock("./YmlEditor", () => {
@@ -125,7 +136,6 @@ describe("TopHeader - YML Button", () => {
       await waitFor(() => {
         expect(applyYmlConfig).toHaveBeenCalledWith(
           "sim:\n  RUs:\n    add: []",
-          { preferExistingMinioSettings: true },
         );
       });
     });

@@ -1,0 +1,7 @@
+# AODT Release Manifest
+# Update via bump.sh, not manually.
+# asim_assets is an NGC resource (not a Docker image) and is versioned independently by its git tag.
+version: "1.5.1"
+images:
+  sim_runtime: "nvcr.io/nvidia/aerial/aodt-sim-runtime:1.5.1"
+  gis_runtime: "nvcr.io/nvidia/aerial/aodt-gis-runtime:1.5.1"

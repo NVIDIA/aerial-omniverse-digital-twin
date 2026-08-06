@@ -24,12 +24,11 @@ import { radioUnitManager } from "../../managers/radioUnitManager";
 import { distributedUnitManager } from "../../managers/distributedUnitManager";
 import { scattererManager } from "../../managers/scattererManager";
 import { userEquipmentManager } from "../../managers/userEquipmentManager";
-import { spawnZoneManager } from "../../managers/spawnZoneManager";
 import {
-  MINIO_SETTINGS_MERGED_EVENT,
+  YML_STORAGE_UPDATED_EVENT,
+  SIMULATION_LOADED_EVENT,
+  applyAndLoadSimulation,
   fetchAvailableMaterials,
-  suppressSync,
-  resumeSync,
 } from "../../managers/ymlConfigLoader";
 
 type S3Provider = "aws" | "minio";
@@ -71,7 +70,7 @@ interface MinIOSettingsProps {
 export const MinIOSettings: React.FC<MinIOSettingsProps> = ({
   shouldAutoConnect = false,
 }) => {
-  const { triggerTimelineRefresh, setDataSourceType } = useViewerStore();
+  const { triggerTimelineRefresh } = useViewerStore();
   const [isExpanded, setIsExpanded] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -180,6 +179,20 @@ export const MinIOSettings: React.FC<MinIOSettingsProps> = ({
     initializeConnection();
   }, []); // Only run on mount
 
+  // Sync the selected database when a sim is loaded elsewhere (e.g. the YML
+  // editor's Apply), so the dropdown reflects the currently loaded simulation.
+  useEffect(() => {
+    const handleSimLoaded = () => {
+      const db = minioClient.getCurrentDatabase();
+      setSelectedDatabase(db);
+      setDatabases((prev) => (db && !prev.includes(db) ? [...prev, db] : prev));
+      setHasLoadedOnce(true);
+    };
+    window.addEventListener(SIMULATION_LOADED_EVENT, handleSimLoaded);
+    return () =>
+      window.removeEventListener(SIMULATION_LOADED_EVENT, handleSimLoaded);
+  }, []);
+
   // Position popover so it stays within viewport
   useLayoutEffect(() => {
     if (!showCredentialInfo || !credentialInfoRef.current) {
@@ -250,21 +263,19 @@ export const MinIOSettings: React.FC<MinIOSettingsProps> = ({
     };
   }, []);
 
-  // Rebuild 3D Tiles URLs when the S3 endpoint is edited (localStorage already updated above)
+  // Rebuild 3D Tiles URLs only when the S3 endpoint actually changes (localStorage
+  // already updated above). Comparing against the last endpoint (rather than
+  // skipping on mount) avoids clobbering tiles built from an imported YAML's
+  // endpoint when this tab remounts.
+  const lastTilesEndpointRef = useRef(formData.s3Endpoint);
   useEffect(() => {
+    if (lastTilesEndpointRef.current === formData.s3Endpoint) return;
+    lastTilesEndpointRef.current = formData.s3Endpoint;
     const timer = window.setTimeout(() => {
       refreshGisTilesetsFromStorage();
     }, 400);
     return () => window.clearTimeout(timer);
   }, [formData.s3Endpoint]);
-
-  // When YML is applied, connection fields may be merged into localStorage — refresh the form
-  useEffect(() => {
-    const syncFromStorage = () => setFormData(getInitialSettings());
-    window.addEventListener(MINIO_SETTINGS_MERGED_EVENT, syncFromStorage);
-    return () =>
-      window.removeEventListener(MINIO_SETTINGS_MERGED_EVENT, syncFromStorage);
-  }, [getInitialSettings]);
 
   // Load available databases (namespaces from catalog, or directories from MinIO)
   const loadDatabases = async () => {
@@ -317,46 +328,33 @@ export const MinIOSettings: React.FC<MinIOSettingsProps> = ({
       return;
     }
 
-    // Set the current database in the MinIO client BEFORE loading
-    minioClient.setCurrentDatabase(selectedDatabase);
-
-    // Set MinIO as the active data source FIRST
-    // (so databaseManager.isReady() checks the right source)
-    setDataSourceType("minio");
-
-    if (!databaseManager.isReady()) {
-      console.warn("[MinIO Settings] Cannot load: DatabaseManager not ready");
-      return;
-    }
-
     setIsLoading(true);
-    suppressSync();
     try {
-      // Clear existing entities from viewer and state before loading
-      databaseManager.clearAll();
-      radioUnitManager.clear();
-      distributedUnitManager.clear();
-      scattererManager.clear();
-      userEquipmentManager.clear();
-
-      // Execute full load
-      await databaseManager.loadAll();
-
-      // Re-trigger spawn zone visualization
-      const szPoints = spawnZoneManager.getPoints();
-      if (szPoints && szPoints.length >= 3) {
-        spawnZoneManager.set(szPoints, spawnZoneManager.getAltitude());
+      // Auto-apply the selected sim's map/scene from its S3 sim_config_submitted.yml
+      // (also resolves the scene CRS used to position DB entities). Best-effort:
+      // if there is no YAML for this sim, just load the database as before.
+      const yaml = await minioClient.fetchSimConfigYaml(selectedDatabase);
+      if (yaml) {
+        // Persist as the loaded YAML so the editor shows the real name/content.
+        try {
+          localStorage.setItem("yml-editor-content", yaml);
+          localStorage.setItem(
+            "yml-editor-filename",
+            "sim_config_submitted.yml",
+          );
+        } catch {
+          // ignore storage failures
+        }
+        window.dispatchEvent(new CustomEvent(YML_STORAGE_UPDATED_EVENT));
       }
 
-      // Trigger timeline refresh in viewer store
-      triggerTimelineRefresh();
+      await applyAndLoadSimulation(selectedDatabase, yaml);
 
       // Mark that we've successfully loaded at least once
       setHasLoadedOnce(true);
     } catch (error) {
       console.error("[MinIO Settings] Failed to load:", error);
     } finally {
-      resumeSync();
       setIsLoading(false);
     }
   };

@@ -847,6 +847,8 @@ class MinIOService {
       columns?: string[];
       where?: string;
       limit?: number;
+      /** Caps raypath rows; takes precedence over `limit`. */
+      rayBudget?: number;
     },
   ): Promise<QueryResult> {
     if (!this.hasCatalog()) {
@@ -874,6 +876,7 @@ class MinIOService {
         columns: options?.columns,
         where: options?.where,
         limit: options?.limit,
+        rayBudget: options?.rayBudget,
       });
 
       // Handle table-not-found gracefully (normal for optional tables)
@@ -983,26 +986,90 @@ class MinIOService {
         foundDirs.push("(root)");
       }
 
-      // Extract CommonPrefixes (directories)
-      const prefixRegex =
-        /<CommonPrefixes>[\s\S]*?<Prefix>(.*?)<\/Prefix>[\s\S]*?<\/CommonPrefixes>/g;
-      let match;
-
-      while ((match = prefixRegex.exec(xmlText)) !== null) {
-        const dirName = match[1];
-        // Remove trailing slash
-        const cleanName = dirName.endsWith("/")
-          ? dirName.slice(0, -1)
-          : dirName;
-        if (cleanName) {
-          foundDirs.push(cleanName);
-        }
-      }
-
+      foundDirs.push(...this.parseCommonPrefixes(xmlText));
       return foundDirs;
     } catch (error) {
       console.error("[MinIO Client] Error listing directories:", error);
       throw error;
+    }
+  }
+
+  /**
+   * Base S3 bucket URL (`${s3Endpoint}/${s3BucketName}`) for browsing simulation
+   * folders / fetching their submitted YAML. Requires the user to have connected
+   * with an S3 endpoint and bucket.
+   */
+  private getS3BucketUrl(): string {
+    let endpoint = "";
+    let bucket = "";
+    if (typeof window !== "undefined") {
+      try {
+        const raw = localStorage.getItem("minio_settings");
+        if (raw) {
+          const p = JSON.parse(raw) as {
+            s3Endpoint?: string;
+            s3BucketName?: string;
+            warehouse?: string;
+          };
+          endpoint = p.s3Endpoint?.trim() ?? "";
+          bucket = p.s3BucketName?.trim() || p.warehouse?.trim() || "";
+        }
+      } catch {
+        // fall back to the live client config below
+      }
+    }
+    endpoint = (endpoint || this.config?.s3Endpoint || "").trim();
+    while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
+    bucket = (bucket || this.config?.s3BucketName || "").trim();
+    while (bucket.startsWith("/")) bucket = bucket.slice(1);
+    while (bucket.endsWith("/")) bucket = bucket.slice(0, -1);
+    if (!endpoint || !bucket) {
+      throw new Error(
+        "Connect to an S3 endpoint and bucket in Settings first.",
+      );
+    }
+    return `${endpoint}/${bucket}`;
+  }
+
+  /**
+   * Extract top-level directory names from an S3 ListObjectsV2 XML response's
+   * `CommonPrefixes` (trailing slash stripped).
+   */
+  private parseCommonPrefixes(xmlText: string): string[] {
+    const prefixRegex =
+      /<CommonPrefixes>[\s\S]*?<Prefix>(.*?)<\/Prefix>[\s\S]*?<\/CommonPrefixes>/g;
+    const dirs: string[] = [];
+    let match;
+    while ((match = prefixRegex.exec(xmlText)) !== null) {
+      const dirName = match[1];
+      const cleanName = dirName.endsWith("/") ? dirName.slice(0, -1) : dirName;
+      if (cleanName) dirs.push(cleanName);
+    }
+    return dirs;
+  }
+
+  /**
+   * List top-level simulation folders (sim_ids) in the configured S3 bucket.
+   * Each folder is expected to contain a `sim_config_submitted.yml`.
+   */
+  async listSimulationIds(): Promise<string[]> {
+    const listUrl = `${this.getS3BucketUrl()}?list-type=2&delimiter=/&max-keys=1000`;
+    const response = await this.fetchViaProxy(listUrl);
+    return this.parseCommonPrefixes(await response.text());
+  }
+
+  /**
+   * Fetch a simulation's `sim_config_submitted.yml` from the configured S3 bucket.
+   * Returns the raw YAML text, or null on any failure.
+   */
+  async fetchSimConfigYaml(simId: string): Promise<string | null> {
+    try {
+      const bucketUrl = this.getS3BucketUrl();
+      const url = `${bucketUrl}/${encodeURIComponent(simId.trim())}/sim_config_submitted.yml`;
+      const response = await this.fetchViaProxy(url);
+      return await response.text();
+    } catch {
+      return null;
     }
   }
 }

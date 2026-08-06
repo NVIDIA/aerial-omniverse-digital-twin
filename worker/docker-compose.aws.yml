@@ -12,7 +12,8 @@
 services:
 
   worker:
-    image: ${SIM_IMAGE:-nvcr.io/nvidia/aerial/aodt-sim-runtime:1.5.0}
+    image: ${SIM_IMAGE:?SIM_IMAGE is not set — run ./worker/up.sh to generate worker/.env from manifest.yaml}
+    restart: unless-stopped
     ports:
       - "50051:50051"
       - "${AODT_UCX_PORT:-13337}:${AODT_UCX_PORT:-13337}"
@@ -48,7 +49,7 @@ services:
         condition: service_completed_successfully
 
   gis-worker:
-    image: ${GIS_IMAGE:-nvcr.io/nvidia/aerial/aodt-gis-runtime:1.5.0}
+    image: ${GIS_IMAGE:?GIS_IMAGE is not set — run ./worker/up.sh to generate worker/.env from manifest.yaml}
     environment:
       TEMPORAL_HOST: ${TEMPORAL_HOST:-temporal:7233}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}

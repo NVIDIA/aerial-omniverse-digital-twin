@@ -14,7 +14,7 @@
 #   SIM_IMAGE             — EM worker image to run. Defaults to the published runtime image.
 #   GIS_IMAGE             — GIS worker image to run. Defaults to the published runtime image.
 #   SERVER_IP             — public IP of this machine. Set by up.sh. Used in MINIO_SERVER_URL
-#                           and NESSIE_S3_ENDPOINT so external clients get reachable URLs.
+#                           so MinIO generates reachable presigned URLs for external clients.
 #   MINIO_API_PORT        — host port for MinIO S3 API (default: 9000). Change if port conflicts.
 #   MINIO_CONSOLE_PORT    — host port for MinIO web console (default: 9001).
 #   NESSIE_PORT           — host port for Nessie Iceberg REST catalog (default: 19120).
@@ -25,7 +25,8 @@
 services:
 
   worker:
-    image: ${SIM_IMAGE:-nvcr.io/nvidia/aerial/aodt-sim-runtime:1.5.0}
+    image: ${SIM_IMAGE:?SIM_IMAGE is not set — run ./worker/up.sh to generate worker/.env from manifest.yaml}
+    restart: unless-stopped
     ports:
       - "50051:50051"
       - "${AODT_UCX_PORT:-13337}:${AODT_UCX_PORT:-13337}"
@@ -34,6 +35,10 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: all
       AODT_UCX_PORT: ${AODT_UCX_PORT:-13337}
       AODT_UCX_HOST: ${AODT_UCX_HOST:-}
+      # Complete host-reachable endpoints used only when rendering the
+      # externally inspectable sim_config_submitted.yml sidecar.
+      AODT_PUBLIC_S3_ENDPOINT: ${AODT_PUBLIC_S3_ENDPOINT:-}
+      AODT_PUBLIC_NESSIE_URI: ${AODT_PUBLIC_NESSIE_URI:-}
       # UCX uses two separate port groups:
       #   AODT_UCX_PORT (13337): CM listener — handles connection setup.
       #   AODT_UCX_WORKER_PORTS (13338-13350): worker data-path sockets — the
@@ -77,7 +82,7 @@ services:
         condition: service_completed_successfully
 
   gis-worker:
-    image: ${GIS_IMAGE:-nvcr.io/nvidia/aerial/aodt-gis-runtime:1.5.0}
+    image: ${GIS_IMAGE:?GIS_IMAGE is not set — run ./worker/up.sh to generate worker/.env from manifest.yaml}
     environment:
       TEMPORAL_HOST: ${TEMPORAL_HOST:-temporal:7233}
       AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://minio:9000}
@@ -172,9 +177,9 @@ services:
       NESSIE_VERSION_STORE_PERSIST_ROCKS_DATABASE_PATH: /home/nessie/rocks-data
       NESSIE_CATALOG_DEFAULT_WAREHOUSE: "warehouse"
       NESSIE_CATALOG_WAREHOUSES_WAREHOUSE_LOCATION: "s3://aerial-data/"
-      # Use the server's public IP so external clients get a reachable S3 endpoint
-      # from the Iceberg REST catalog. Set by up.sh via SERVER_IP.
+      # Internal endpoint for Nessie; external endpoint is returned to REST clients.
       NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ENDPOINT: ${NESSIE_S3_ENDPOINT:-http://minio:9000}
+      NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_EXTERNAL_ENDPOINT: ${NESSIE_S3_EXTERNAL_ENDPOINT:-http://minio:9000}
       NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_PATH_STYLE_ACCESS: "true"
       NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_REGION: "us-east-1"
       NESSIE_CATALOG_SERVICE_S3_DEFAULT_OPTIONS_ACCESS_KEY: "urn:nessie-secret:quarkus:s3creds"

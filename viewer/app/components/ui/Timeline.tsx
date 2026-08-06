@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { fetchFromDataSource } from "../../managers/dataLoader";
+import { raypathManager } from "../../managers/raypathManager";
 import { raypathLayer } from "../layers/RaypathLayer";
 import { useViewerStore } from "../../store/viewerStore";
 import { minioClient } from "@/services/database";
@@ -13,6 +14,7 @@ import * as Cesium from "cesium";
 import { TIMELINE_CONFIG } from "../../constants/timeline";
 import type { TimeInfo } from "@/types/simulation";
 
+const DETAIL_LOAD_DEBOUNCE_MS = 200;
 interface TimelineProps {
   database: string;
   refreshTrigger?: number;
@@ -40,6 +42,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const [goToValue, setGoToValue] = useState<string>("");
   const [goToError, setGoToError] = useState<string | null>(null);
   const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const detailLoadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Get sidebar states for proper centering
   const {
@@ -114,11 +117,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
     try {
       // Use dataLoader to fetch time-index data from MinIO / Iceberg
-      const result = await fetchFromDataSource(
-        "time_info",
-        database,
-        `SELECT * FROM ${database}.time_info ORDER BY time_idx ASC`,
-      );
+      const result = await fetchFromDataSource("time_info", database);
 
       if (result.error) {
         console.error("[Timeline] Error loading time_info:", result.error);
@@ -182,6 +181,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const startPlayback = () => {
     if (timeData.length === 0) return;
 
+    raypathManager.clearDetail();
     setIsPlaying(true);
 
     playbackIntervalRef.current = setInterval(() => {
@@ -261,9 +261,35 @@ export const Timeline: React.FC<TimelineProps> = ({
       if (playbackIntervalRef.current) {
         clearInterval(playbackIntervalRef.current);
       }
+      if (detailLoadTimerRef.current) {
+        clearTimeout(detailLoadTimerRef.current);
+      }
     };
   }, []);
 
+  // When stopped on a timestep, load denser rays for t ± n (debounced).
+  useEffect(() => {
+    if (detailLoadTimerRef.current) {
+      clearTimeout(detailLoadTimerRef.current);
+      detailLoadTimerRef.current = null;
+    }
+
+    if (isPlaying || selectedTimeIdx === null || !database || !isConnected) {
+      raypathManager.clearDetail();
+      return;
+    }
+
+    detailLoadTimerRef.current = setTimeout(() => {
+      void raypathManager.loadDetailWindow(selectedTimeIdx);
+    }, DETAIL_LOAD_DEBOUNCE_MS);
+
+    return () => {
+      if (detailLoadTimerRef.current) {
+        clearTimeout(detailLoadTimerRef.current);
+        detailLoadTimerRef.current = null;
+      }
+    };
+  }, [selectedTimeIdx, isPlaying, database, isConnected]);
   // Update playback interval
   useEffect(() => {
     if (isPlaying) {

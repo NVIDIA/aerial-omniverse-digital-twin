@@ -22,6 +22,6 @@ export type {
   ObjectType,
 } from "./entities";
 
-export type { CameraState, TilesetConfig } from "./cesium";
+export type { CameraState, TilesetConfig, TilesetAvailability } from "./cesium";
 
 export type { ScenarioParams } from "./simulation";

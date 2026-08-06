@@ -13,6 +13,7 @@
 import jsYaml from "js-yaml";
 import * as Cesium from "cesium";
 
+import { databaseManager } from "./databaseManager";
 import { radioUnitManager } from "./radioUnitManager";
 import { distributedUnitManager } from "./distributedUnitManager";
 import { userEquipmentManager } from "./userEquipmentManager";
@@ -22,7 +23,7 @@ import { raypathManager } from "./raypathManager";
 import { spawnZoneManager } from "./spawnZoneManager";
 import { spawnZoneLayer } from "@/components/layers/SpawnZoneLayer";
 import {
-  refreshGisTilesetsFromStorage,
+  refreshGisTilesetsFromConfig,
   useViewerStore,
 } from "@/store/viewerStore";
 import {
@@ -138,11 +139,6 @@ interface YmlConfig {
   gis?: Record<string, any>;
 }
 
-/** Dispatched after MinIO connection fields are merged from an applied YML file. */
-export const MINIO_SETTINGS_MERGED_EVENT = "minio-settings-merged-from-yml";
-
-const MINIO_SETTINGS_STORAGE_KEY = "minio_settings";
-
 type MinioS3Provider = "aws" | "minio";
 
 interface MinioStoredConnection {
@@ -238,63 +234,6 @@ export function extractMinioFieldsFromYml(
   }
 
   return out;
-}
-
-function mergeMinioSettingsFromYmlConfig(
-  config: Record<string, unknown>,
-  options?: { preferExistingLocalStorage?: boolean },
-): void {
-  if (typeof window === "undefined") return;
-
-  const extracted = extractMinioFieldsFromYml(config);
-  const keys = Object.keys(extracted) as (keyof MinioStoredConnection)[];
-  if (keys.length === 0) return;
-
-  const defaults: MinioStoredConnection = {
-    catalogType: "rest",
-    glueRegion: "us-east-1",
-    catalogUri: "",
-    s3Endpoint: "",
-    s3BucketName: "",
-    s3Provider: "minio",
-    accessKey: "",
-    secretKey: "",
-  };
-
-  let savedParsed: Partial<MinioStoredConnection> & { warehouse?: string } = {};
-  try {
-    const saved = localStorage.getItem(MINIO_SETTINGS_STORAGE_KEY);
-    if (saved) {
-      savedParsed = JSON.parse(saved) as Partial<MinioStoredConnection> & {
-        warehouse?: string;
-      };
-      if (!savedParsed.s3BucketName?.trim() && savedParsed.warehouse?.trim()) {
-        savedParsed = {
-          ...savedParsed,
-          s3BucketName: savedParsed.warehouse.trim(),
-        };
-      }
-    }
-  } catch {
-    // ignore corrupt storage
-  }
-
-  // yml-wins: explicit apply — YML db.* overwrites saved MinIO settings.
-  // preferExisting: cached re-apply on load — saved settings win so in-app edits are not reset.
-  let merged: MinioStoredConnection = options?.preferExistingLocalStorage
-    ? { ...defaults, ...extracted, ...savedParsed }
-    : { ...defaults, ...savedParsed, ...extracted };
-
-  if (!merged.s3BucketName?.trim() && savedParsed.warehouse?.trim()) {
-    merged = { ...merged, s3BucketName: savedParsed.warehouse.trim() };
-  }
-
-  try {
-    localStorage.setItem(MINIO_SETTINGS_STORAGE_KEY, JSON.stringify(merged));
-    window.dispatchEvent(new CustomEvent(MINIO_SETTINGS_MERGED_EVENT));
-  } catch {
-    // localStorage unavailable or full
-  }
 }
 
 function mergeGisSceneUrlFromYmlConfig(config: Record<string, unknown>): void {
@@ -1260,15 +1199,8 @@ export function clearAllEntities(): void {
  * Clears all existing entities before creating new ones.
  *
  * @param yamlContent - Raw YAML string from the uploaded file
- * @param options.preferExistingMinioSettings - If true, MinIO/Iceberg fields already in
- *   `localStorage` (minio_settings) are kept; YML only fills gaps. Use when re-applying
- *   cached YML on page load so user-edited connection fields are not overwritten.
  * @returns A summary of what was created, or throws on parse error
  */
-export interface ApplyYmlConfigOptions {
-  preferExistingMinioSettings?: boolean;
-}
-
 /**
  * True if the YAML defines any entity with a projected (x/y/z) position —
  * i.e. positions that will go through `positionFromLocal` and depend on
@@ -1335,10 +1267,7 @@ export async function prefetchSceneMetadataFromYmlConfig(
   await fetchSceneMetadata(endpoint, bucketSeg, scene);
 }
 
-export function applyYmlConfig(
-  yamlContent: string,
-  options?: ApplyYmlConfigOptions,
-): {
+export function applyYmlConfig(yamlContent: string): {
   distributedUnits: number;
   panels: number;
   radioUnits: number;
@@ -1361,11 +1290,7 @@ export function applyYmlConfig(
       throw new Error("Invalid YML configuration: expected an object");
     }
 
-    mergeMinioSettingsFromYmlConfig(config as Record<string, unknown>, {
-      preferExistingLocalStorage: options?.preferExistingMinioSettings === true,
-    });
     mergeGisSceneUrlFromYmlConfig(config as Record<string, unknown>);
-    refreshGisTilesetsFromStorage();
 
     const s3Config = config.db?.s3_config;
     const sceneUrl = config.gis?.scene?.scene_url;
@@ -1385,7 +1310,7 @@ export function applyYmlConfig(
         scene,
         "viz",
       )}/`;
-      useViewerStore.getState().setVizBaseUrl(vizBaseUrl);
+      refreshGisTilesetsFromConfig(endpoint, sceneUrl, bucketSeg, vizBaseUrl);
 
       // fetchSceneMetadata is intentionally NOT awaited here — it's hoisted
       // into prefetchSceneMetadataFromYmlConfig so callers can await CRS
@@ -1499,6 +1424,67 @@ export function applyYmlConfig(
     };
   } finally {
     _isSyncing = false;
+  }
+}
+
+/**
+ * Resolve the scene CRS then apply a YAML config (entities + GIS tiles). A
+ * prefetch failure is only fatal when the YAML has projected (x/y/z) positions
+ * that depend on the CRS. This never touches the MinIO/Iceberg connection or the
+ * Settings-pane fields — importing a YAML only loads the map.
+ */
+export async function applyYmlContent(yamlContent: string): Promise<void> {
+  const config = jsYaml.load(yamlContent) as Record<string, unknown>;
+  if (!config || typeof config !== "object") {
+    throw new Error("Invalid YML configuration: expected an object");
+  }
+  try {
+    await prefetchSceneMetadataFromYmlConfig(yamlContent);
+  } catch (prefetchError) {
+    if (ymlConfigUsesProjectedPositions(yamlContent)) throw prefetchError;
+    console.warn(
+      "[ymlConfigLoader] Scene metadata prefetch failed; YAML has no projected positions, applying anyway:",
+      prefetchError,
+    );
+  }
+  applyYmlConfig(yamlContent);
+}
+
+/**
+ * Apply a sim's YAML (map/scene/CRS) and load its telemetry from MinIO — the
+ * same effect as clicking "Load" in the Settings pane. `database` is the sim_id
+ * / Iceberg namespace whose tables should be loaded; `yaml`, when provided,
+ * supplies the map/scene applied before the database entities are loaded.
+ */
+export async function applyAndLoadSimulation(
+  database: string,
+  yaml?: string | null,
+): Promise<void> {
+  minioClient.setCurrentDatabase(database);
+  useViewerStore.getState().setDataSourceType("minio");
+  if (!databaseManager.isReady()) {
+    throw new Error("DatabaseManager not ready");
+  }
+  suppressSync();
+  try {
+    if (yaml) await applyYmlContent(yaml);
+
+    databaseManager.clearAll();
+    radioUnitManager.clear();
+    distributedUnitManager.clear();
+    scattererManager.clear();
+    userEquipmentManager.clear();
+
+    await databaseManager.loadAll();
+
+    const szPoints = spawnZoneManager.getPoints();
+    if (szPoints && szPoints.length >= 3) {
+      spawnZoneManager.set(szPoints, spawnZoneManager.getAltitude());
+    }
+    useViewerStore.getState().triggerTimelineRefresh();
+    window.dispatchEvent(new CustomEvent(SIMULATION_LOADED_EVENT));
+  } finally {
+    resumeSync();
   }
 }
 
@@ -2053,6 +2039,13 @@ let _isSyncing = false;
  * programmatically. The YmlEditor listens for this to refresh its content.
  */
 export const YML_STORAGE_UPDATED_EVENT = "yml-storage-updated";
+
+/**
+ * Custom event dispatched after a simulation is loaded via
+ * {@link applyAndLoadSimulation}. The Settings pane listens for this to sync its
+ * selected-database UI with the newly loaded sim.
+ */
+export const SIMULATION_LOADED_EVENT = "simulation-loaded";
 
 /**
  * Write the current entity / scenario state back to localStorage as YAML.

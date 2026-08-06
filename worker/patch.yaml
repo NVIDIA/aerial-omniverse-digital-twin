@@ -1,0 +1,8 @@
+# AODT Hotfix Patch Overlay
+# Override individual image tags for patch releases without a full asim_client release.
+# Leave images empty (or absent) for standard releases.
+#
+# Example — patch only the sim worker:
+#   images:
+#     sim_runtime: "nvcr.io/nvidia/aerial/aodt-sim-runtime:1.5.0-1"
+images: {}

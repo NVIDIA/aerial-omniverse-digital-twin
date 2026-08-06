@@ -232,25 +232,17 @@ describe("applyYmlConfig", () => {
     spawnZoneManager.clear();
   });
 
-  describe("MinIO settings merge from YML db", () => {
+  describe("MinIO settings from YML db", () => {
     beforeEach(() => {
       localStorage.removeItem("minio_settings");
     });
 
-    it("merges catalog and s3 fields into minio_settings localStorage", () => {
+    it("does not write YAML db fields into minio_settings localStorage", () => {
       applyYmlConfig(MINIO_MERGE_YML);
-      const saved = JSON.parse(
-        localStorage.getItem("minio_settings") as string,
-      );
-      expect(saved.catalogUri).toBe(
-        "http://catalog.example.local:19120/iceberg/",
-      );
-      expect(saved.s3Endpoint).toBe("http://s3.example.local:9020");
-      expect(saved.s3BucketName).toBe("parquet-export-test");
-      expect(saved.s3Provider).toBe("minio");
+      expect(localStorage.getItem("minio_settings")).toBeNull();
     });
 
-    it("preferExistingMinioSettings keeps saved minio_settings over YML db fields", () => {
+    it("keeps existing minio_settings unchanged when applying YAML", () => {
       localStorage.setItem(
         "minio_settings",
         JSON.stringify({
@@ -260,67 +252,14 @@ describe("applyYmlConfig", () => {
           s3Provider: "aws",
         }),
       );
-      applyYmlConfig(MINIO_MERGE_YML, { preferExistingMinioSettings: true });
+      applyYmlConfig(MINIO_MERGE_YML);
       const saved = JSON.parse(
         localStorage.getItem("minio_settings") as string,
       );
       expect(saved.catalogUri).toBe("http://user-catalog/");
       expect(saved.s3Endpoint).toBe("http://user-s3:9000");
-      expect(saved.s3BucketName).toBe("user-warehouse");
+      expect(saved.warehouse).toBe("user-warehouse");
       expect(saved.s3Provider).toBe("aws");
-    });
-
-    it("only overwrites fields present in YAML", () => {
-      localStorage.setItem(
-        "minio_settings",
-        JSON.stringify({
-          catalogUri: "http://keep-catalog/",
-          s3Endpoint: "http://keep-endpoint:9000",
-          warehouse: "keep-warehouse",
-          s3Provider: "aws",
-        }),
-      );
-      const yml = `
-db:
-  s3_config:
-    bucket: new-bucket-only
-sim:
-  DUs:
-    add:
-    - id: 1
-      pos: { x: 0, y: 0, z: 0 }
-`;
-      applyYmlConfig(yml);
-      const saved = JSON.parse(
-        localStorage.getItem("minio_settings") as string,
-      );
-      expect(saved.catalogUri).toBe("http://keep-catalog/");
-      expect(saved.s3Endpoint).toBe("http://keep-endpoint:9000");
-      expect(saved.s3BucketName).toBe("new-bucket-only");
-      expect(saved.s3Provider).toBe("aws");
-    });
-
-    it("uses first parquet_export.s3_configs entry when db.s3_config is absent", () => {
-      const yml = `
-db:
-  parquet_export:
-    s3_configs:
-    - endpoint_url: http://from-list:9020
-      bucket: list-bucket
-      provider: minio
-sim:
-  DUs:
-    add:
-    - id: 1
-      pos: { x: 0, y: 0, z: 0 }
-`;
-      applyYmlConfig(yml);
-      const saved = JSON.parse(
-        localStorage.getItem("minio_settings") as string,
-      );
-      expect(saved.s3Endpoint).toBe("http://from-list:9020");
-      expect(saved.s3BucketName).toBe("list-bucket");
-      expect(saved.s3Provider).toBe("minio");
     });
   });
 

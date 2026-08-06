@@ -44,8 +44,10 @@ import {
 } from "./utils/localStorage";
 import {
   buildGisTilesetConfigsFromStorage,
+  buildGisTilesetConfigs,
   mergeSavedTilesetPreferences,
 } from "@/utils/gisTilesets";
+import { probeTilesetAvailability } from "@/utils/minioProxyResource";
 import { DEFAULT_BASE_LAYER_ID } from "@/constants/baseLayers";
 import * as Cesium from "cesium";
 
@@ -67,10 +69,64 @@ export function __resetTilesetsRestoredForTesting(): void {
  */
 export function refreshGisTilesetsFromStorage(): void {
   const built = buildGisTilesetConfigsFromStorage();
+  refreshGisTilesets(built);
+}
+
+export function refreshGisTilesetsFromConfig(
+  s3Endpoint: string,
+  sceneUrl: string,
+  s3BucketSegment?: string,
+  vizBaseUrl?: string,
+): void {
+  const built = buildGisTilesetConfigs(s3Endpoint, sceneUrl, s3BucketSegment);
+  refreshGisTilesets(built, vizBaseUrl);
+}
+
+function refreshGisTilesets(
+  built: ReturnType<typeof buildGisTilesetConfigs>,
+  vizBaseUrl?: string,
+) {
   const saved = loadTilesetConfigs();
   const merged = mergeSavedTilesetPreferences(built, saved ?? null);
-  useViewerStore.setState({ tilesets: merged });
-  saveTilesetConfigs(merged);
+  // Mark URL-backed layers as "checking" so the UI reflects the in-flight probe
+  // and TileManager holds off loading until availability is known.
+  const withStatus = merged.map((t) =>
+    t.url ? { ...t, availability: "checking" as const } : t,
+  );
+  // Set vizBaseUrl in the same update when supplied so TileManager sees the new
+  // scene URL and the fresh "checking" configs atomically — otherwise a separate
+  // vizBaseUrl change first processes the previous scenario's still-"available"
+  // tilesets, racing/poisoning the new load (needs a manual 3D-tiles refresh).
+  useViewerStore.setState(
+    vizBaseUrl !== undefined
+      ? { tilesets: withStatus, vizBaseUrl }
+      : { tilesets: withStatus },
+  );
+  saveTilesetConfigs(withStatus);
+  void probeTilesetsAvailability(withStatus);
+}
+
+/**
+ * HEAD-probe each URL-backed tileset and update its availability in the store.
+ * Missing layers (404) are excluded from loading by TileManager; unknown/other
+ * errors fall through to a normal load attempt so working datasets are unaffected.
+ */
+async function probeTilesetsAvailability(
+  tilesets: TilesetConfig[],
+): Promise<void> {
+  await Promise.all(
+    tilesets.map(async (t) => {
+      if (!t.url) return;
+      const availability = await probeTilesetAvailability(t.url);
+      // Only apply if this tileset is still present and still awaiting its probe,
+      // so a newer refresh (which resets to "checking") is not clobbered.
+      const current = useViewerStore
+        .getState()
+        .tilesets.find((x) => x.id === t.id);
+      if (!current || current.availability !== "checking") return;
+      useViewerStore.getState().updateTileset(t.id, { availability });
+    }),
+  );
 }
 
 /**

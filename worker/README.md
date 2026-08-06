@@ -8,6 +8,7 @@ The `client/` directory in this repo contains the client library used to connect
 - A Linux machine with an NVIDIA GPU
 - Docker with the NVIDIA Container Toolkit (see below)
 - Docker Compose v2 (CLI plugin) ≥ 2.3 — the legacy standalone `docker-compose` v1 is not supported
+- [Mike Farah's `yq`](https://github.com/mikefarah/yq) v4 for reading the worker image manifest
 
 ### Docker
 
@@ -23,6 +24,12 @@ sudo apt-get update
 sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo usermod -aG docker $USER  # allow running docker without sudo (re-login required)
 ```
+
+### yq
+
+`worker/up.sh` requires [Mike Farah's `yq`](https://github.com/mikefarah/yq) v4.
+
+Follow the official [`yq` installation guide](https://github.com/mikefarah/yq#install).
 
 ### NVIDIA Container Toolkit
 

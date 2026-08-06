@@ -46,7 +46,7 @@ sudo apt-get update
 sudo apt-get install -y cmake protobuf-compiler-grpc libgrpc++-dev pkg-config python3-dev python3-venv
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pybind11 pyyaml omegaconf pytest numpy
+pip install pybind11 pyyaml omegaconf pytest numpy 'pyiceberg[pyarrow,s3fs]' duckdb pandas
 ```
 
 Docker and the NVIDIA Container Toolkit are required to run the worker. See [worker/README.md](../worker/README.md) for installation instructions.
@@ -142,7 +142,7 @@ sudo apt-get update
 sudo apt-get install -y cmake protobuf-compiler-grpc libgrpc++-dev pkg-config python3-dev python3-venv
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pybind11 pyyaml omegaconf pytest numpy
+pip install pybind11 pyyaml omegaconf pytest numpy 'pyiceberg[pyarrow,s3fs]' duckdb pandas
 ```
 
 No WSL2-specific transport setup is required beyond normal network reachability to the server address used by the client.
@@ -175,7 +175,7 @@ python3 examples/example_client.py
 brew install grpc protobuf cmake pkg-config
 python3 -m venv .venv
 source .venv/bin/activate
-pip3 install pybind11 pyyaml omegaconf pytest numpy
+pip3 install pybind11 pyyaml omegaconf pytest numpy 'pyiceberg[pyarrow,s3fs]' duckdb pandas
 ```
 
 ### Build
@@ -232,7 +232,7 @@ Set up Python. vcpkg installs its own Python — the built Python modules are on
 
 ```
 <vcpkg-root>\installed\x64-windows\tools\python3\python.exe -m ensurepip --upgrade
-<vcpkg-root>\installed\x64-windows\tools\python3\python.exe -m pip install pyyaml omegaconf pytest numpy
+<vcpkg-root>\installed\x64-windows\tools\python3\python.exe -m pip install pyyaml omegaconf pytest numpy 'pyiceberg[pyarrow,s3fs]' duckdb pandas
 ```
 
 Add vcpkg's Python to PATH for convenience:

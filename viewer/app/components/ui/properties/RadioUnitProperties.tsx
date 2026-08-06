@@ -190,7 +190,7 @@ export const RadioUnitProperties: React.FC = () => {
                   </div>
 
                   {/* Position */}
-                  <div className="grid grid-cols-[2fr_2fr_1fr] gap-3">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs text-gray-400 mb-1">
                         Lat [°]
@@ -241,29 +241,6 @@ export const RadioUnitProperties: React.FC = () => {
                                 ),
                                 ru.position.cartographic.latitude,
                                 ru.position.cartographic.height,
-                              ),
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-400 mb-1">
-                        Alt [m]
-                      </label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        className="w-full text-xs bg-gray-800 border border-gray-700 rounded px-2 py-1 text-white font-mono"
-                        value={ru.position.cartographic.height.toFixed(1)}
-                        onChange={(e) =>
-                          radioUnitManager.update(ru.id, {
-                            position: {
-                              ...ru.position,
-                              cartographic: new Cesium.Cartographic(
-                                ru.position.cartographic.longitude,
-                                ru.position.cartographic.latitude,
-                                Number(e.target.value) || 0,
                               ),
                             },
                           })

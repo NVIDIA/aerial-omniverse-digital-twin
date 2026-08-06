@@ -57,6 +57,117 @@ interface IcebergRequest {
   columns?: string[];
   where?: string;
   limit?: number;
+  /** Caps raypath rows; takes precedence over `limit`. */
+  rayBudget?: number;
+}
+
+interface SelectQueryOptions {
+  columns: string;
+  whereClause: string;
+  limit?: number | null;
+  rayBudget?: number | null;
+}
+
+type RayPowerMode = "amplitude" | "none";
+
+/** Match client-side computePowerDbm: 10*log10(|a|^2)+30 from first tap. */
+const POWER_FROM_AMPLITUDE_SQL =
+  `CASE WHEN len(ampl_re) > 0 AND ` +
+  `(pow(ampl_re[1], 2) + pow(COALESCE(ampl_im[1], 0), 2)) > 0 ` +
+  `THEN 10 * log10(pow(ampl_re[1], 2) + pow(COALESCE(ampl_im[1], 0), 2)) + 30 ` +
+  `ELSE -200 END`;
+
+/**
+ * SELECT builder. With `rayBudget`, mirrors selectRaysForBudget (see rayBudget.ts).
+ * Ranking uses ampl_re/ampl_im (exported raypaths schema has no power_dB column).
+ */
+function buildSelectSql(
+  fromExpr: string,
+  opts: SelectQueryOptions & { powerMode?: RayPowerMode },
+): string {
+  const { columns, whereClause } = opts;
+  const powerMode = opts.powerMode ?? "amplitude";
+  const rayBudget =
+    opts.rayBudget != null
+      ? Math.max(0, Math.floor(Number(opts.rayBudget)))
+      : null;
+  const limit =
+    rayBudget != null
+      ? null
+      : opts.limit != null
+        ? Math.max(0, Math.floor(Number(opts.limit)))
+        : null;
+
+  if (rayBudget != null && rayBudget > 0) {
+    const powerExpr =
+      powerMode === "amplitude" ? POWER_FROM_AMPLITUDE_SQL : "-200";
+    const rankOrder = powerMode === "none" ? "" : "ORDER BY _power DESC";
+    return (
+      `WITH filtered AS (` +
+      `SELECT ${columns}, ${powerExpr} AS _power ` +
+      `FROM ${fromExpr}${whereClause}` +
+      `), ranked AS (` +
+      `SELECT *, ` +
+      `ROW_NUMBER() OVER (PARTITION BY ue_id, time_idx ${rankOrder}) AS _ray_rank, ` +
+      `DENSE_RANK() OVER (ORDER BY ue_id) AS _ue_ord, ` +
+      `DENSE_RANK() OVER (ORDER BY time_idx) AS _t_ord ` +
+      `FROM filtered` +
+      `), ordered AS (` +
+      `SELECT *, ` +
+      `ROW_NUMBER() OVER (ORDER BY _ray_rank, _ue_ord, _t_ord) AS _budget_ord ` +
+      `FROM ranked` +
+      `) ` +
+      `SELECT * EXCLUDE (_power, _ray_rank, _ue_ord, _t_ord, _budget_ord) ` +
+      `FROM ordered ` +
+      `WHERE _budget_ord <= ${rayBudget} ` +
+      `ORDER BY _budget_ord`
+    );
+  }
+
+  const limitClause = limit != null ? ` LIMIT ${limit}` : "";
+  return `SELECT ${columns} FROM ${fromExpr}${whereClause}${limitClause}`;
+}
+
+/** Ray-budget query: amplitude power → no power → plain LIMIT. */
+async function querySqlWithRayBudgetFallback(
+  db: any,
+  fromExpr: string,
+  selectOpts: SelectQueryOptions,
+): Promise<any[]> {
+  const run = (powerMode: RayPowerMode | null) =>
+    querySQL(
+      db,
+      powerMode == null
+        ? buildSelectSql(fromExpr, {
+            columns: selectOpts.columns,
+            whereClause: selectOpts.whereClause,
+            limit: Math.max(0, Math.floor(Number(selectOpts.rayBudget))),
+            rayBudget: null,
+          })
+        : buildSelectSql(fromExpr, { ...selectOpts, powerMode }),
+    );
+
+  if (selectOpts.rayBudget == null || selectOpts.rayBudget <= 0) {
+    return querySQL(db, buildSelectSql(fromExpr, selectOpts));
+  }
+
+  for (const mode of ["amplitude", "none"] as RayPowerMode[]) {
+    try {
+      return await run(mode);
+    } catch (err) {
+      console.warn(
+        `[Iceberg API] Ray budget (${mode}) failed, trying next fallback:`,
+        err,
+      );
+      try {
+        await runSQL(db, "ROLLBACK;");
+      } catch {
+        // no active transaction
+      }
+    }
+  }
+
+  return run(null);
 }
 
 // ============================================================
@@ -794,30 +905,29 @@ async function executeDuckDbIcebergQuery(
     const columns =
       req.columns && req.columns.length > 0 ? req.columns.join(", ") : "*";
     const whereClause = req.where ? ` WHERE ${req.where}` : "";
-    const limitClause =
-      req.limit != null
-        ? ` LIMIT ${Math.max(0, Math.floor(Number(req.limit)))}`
-        : "";
+    const selectOpts: SelectQueryOptions = {
+      columns,
+      whereClause,
+      limit: req.limit,
+      rayBudget: req.rayBudget,
+    };
 
     let rows: any[];
 
     // Prefer manifest-driven file list (same idea as PyIceberg scan.plan_files → parquet_scan).
     try {
-      rows = await queryViaManifestParquetFiles(
-        db,
-        tableLocation,
-        columns,
-        whereClause,
-        limitClause,
-      );
+      rows = await queryViaManifestParquetFiles(db, tableLocation, selectOpts);
     } catch {
       rows = [];
     }
 
     if (rows.length === 0 && icebergExtensionAvailable && tableLocation) {
       try {
-        const sql = `SELECT ${columns} FROM iceberg_scan('${escapeSqlString(tableLocation)}')${whereClause}${limitClause}`;
-        rows = await querySQL(db, sql);
+        rows = await querySqlWithRayBudgetFallback(
+          db,
+          `iceberg_scan('${escapeSqlString(tableLocation)}')`,
+          selectOpts,
+        );
 
         if (rows.length === 0) {
           try {
@@ -826,9 +936,7 @@ async function executeDuckDbIcebergQuery(
               tableLocation,
               metadataLocation,
               req.table!,
-              columns,
-              whereClause,
-              limitClause,
+              selectOpts,
               { s3BucketName: req.s3BucketName, namespace: req.namespace },
             );
             if (fallbackRows.length > 0) {
@@ -848,9 +956,7 @@ async function executeDuckDbIcebergQuery(
           tableLocation,
           metadataLocation,
           req.table!,
-          columns,
-          whereClause,
-          limitClause,
+          selectOpts,
           { s3BucketName: req.s3BucketName, namespace: req.namespace },
         );
       }
@@ -860,31 +966,12 @@ async function executeDuckDbIcebergQuery(
         tableLocation,
         metadataLocation,
         req.table!,
-        columns,
-        whereClause,
-        limitClause,
+        selectOpts,
         { s3BucketName: req.s3BucketName, namespace: req.namespace },
       );
     }
 
-    // If manifest returned partial data, try glob fallback for more complete results
-    if (rows.length > 0) {
-      try {
-        const globRows = await queryWithFallbacks(
-          db,
-          tableLocation,
-          metadataLocation,
-          req.table!,
-          columns,
-          whereClause,
-          limitClause,
-          { s3BucketName: req.s3BucketName, namespace: req.namespace },
-        );
-        if (globRows.length > rows.length) rows = globRows;
-      } catch {
-        /* keep existing rows */
-      }
-    }
+    // Fallback is triggered only when the preferred path produced no rows
 
     const serializedRows = serializeForJSON(rows);
 
@@ -908,9 +995,7 @@ async function executeDuckDbIcebergQuery(
 async function queryViaManifestParquetFiles(
   db: any,
   tableLocation: string | undefined,
-  columns: string,
-  whereClause: string,
-  limitClause: string,
+  selectOpts: SelectQueryOptions,
 ): Promise<any[]> {
   if (!icebergExtensionAvailable || !tableLocation) {
     return [];
@@ -928,8 +1013,11 @@ async function queryViaManifestParquetFiles(
   const fileList = filePaths
     .map((p: string) => `'${escapeSqlString(p)}'`)
     .join(", ");
-  const sql = `SELECT ${columns} FROM parquet_scan([${fileList}], union_by_name = true)${whereClause}${limitClause}`;
-  return querySQL(db, sql);
+  return querySqlWithRayBudgetFallback(
+    db,
+    `parquet_scan([${fileList}], union_by_name = true)`,
+    selectOpts,
+  );
 }
 
 /**
@@ -944,9 +1032,7 @@ async function queryWithFallbacks(
   tableLocation: string | undefined,
   metadataLocation: string | undefined,
   tableName: string,
-  columns: string,
-  whereClause: string,
-  limitClause: string,
+  selectOpts: SelectQueryOptions,
   catalogHint?: { s3BucketName?: string; namespace?: string },
 ): Promise<any[]> {
   // Determine the table root from location or metadata-location
@@ -989,8 +1075,11 @@ async function queryWithFallbacks(
 
   for (const pattern of patterns) {
     try {
-      const sql = `SELECT ${columns} FROM parquet_scan('${escapeSqlString(pattern)}', union_by_name = true)${whereClause}${limitClause}`;
-      const rows = await querySQL(db, sql);
+      const rows = await querySqlWithRayBudgetFallback(
+        db,
+        `parquet_scan('${escapeSqlString(pattern)}', union_by_name = true)`,
+        selectOpts,
+      );
       if (rows.length > 0) {
         return rows;
       }

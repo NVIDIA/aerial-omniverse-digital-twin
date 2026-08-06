@@ -133,7 +133,14 @@ export const TileManager: React.FC = () => {
 
     try {
       const Cesium = window.Cesium;
-      const enabledTilesets = tilesets.filter((t) => t.enabled);
+      // Skip layers still being probed ("checking") or known-absent ("missing")
+      // so we never issue doomed tile requests for layers a dataset does not ship.
+      const enabledTilesets = tilesets.filter(
+        (t) =>
+          t.enabled &&
+          t.availability !== "checking" &&
+          t.availability !== "missing",
+      );
 
       const currentEnabledIds = new Set(enabledTilesets.map((t) => t.id));
       const loadedIds = new Set(loadedTilesets.keys());
@@ -193,6 +200,14 @@ export const TileManager: React.FC = () => {
 
       const Cesium = window.Cesium;
       const primitives = cesiumViewer.scene.primitives;
+
+      // Cancel any in-progress camera flight so we don't keep flying toward a
+      // tileset that is about to be removed (and reset the zoom-first flag).
+      try {
+        cesiumViewer.camera?.cancelFlight?.();
+      } catch {
+        /* viewer may be mid-teardown */
+      }
 
       // Remove ALL Cesium3DTileset primitives from the scene, not just tracked ones
       for (let i = primitives.length - 1; i >= 0; i--) {
@@ -453,7 +468,23 @@ export const TileManager: React.FC = () => {
 
       if (!hasZoomedToFirstTilesetRef.current) {
         hasZoomedToFirstTilesetRef.current = true;
-        cesiumViewer.flyTo(tileset, { duration: 2.0 });
+        // Fly to the bounding sphere (a value captured now) rather than the
+        // tileset object. viewer.flyTo(tileset) registers the tileset as the
+        // Viewer's zoom target, which _postRender dereferences every frame
+        // until the flight ends; if the tileset is unloaded/destroyed first
+        // (e.g. a layer toggled off or a new scene applied mid-flight) Cesium
+        // crashes with "Cannot read properties of undefined (reading
+        // 'updateTransform')". flyToBoundingSphere holds no tileset reference.
+        try {
+          const boundingSphere = tileset.boundingSphere;
+          if (boundingSphere) {
+            cesiumViewer.camera.flyToBoundingSphere(boundingSphere, {
+              duration: 2.0,
+            });
+          }
+        } catch (e) {
+          console.warn("[TileManager] Failed to fly to tileset bounds:", e);
+        }
       }
     } catch (error) {
       console.warn(

@@ -231,9 +231,10 @@ export const saveTilesetConfigs = (tilesets: TilesetConfig[]) => {
   if (typeof window === "undefined") return;
 
   try {
-    // Only save user-modifiable properties, exclude runtime properties like loadedBounds
+    // Only save user-modifiable properties, exclude runtime properties like
+    // loadedBounds and availability (re-probed on each scene load).
     const configsToSave = tilesets.map((t) => {
-      const { loadedBounds, ...config } = t;
+      const { loadedBounds, availability, ...config } = t;
       return config;
     });
     localStorage.setItem(TILESET_CONFIGS_KEY, JSON.stringify(configsToSave));

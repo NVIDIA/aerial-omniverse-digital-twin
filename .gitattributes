@@ -1,0 +1,2 @@
+resource/assets.zip filter=lfs diff=lfs merge=lfs -text
+resource/demo_tokyo_map.zip filter=lfs diff=lfs merge=lfs -text

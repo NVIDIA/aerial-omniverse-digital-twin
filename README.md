@@ -24,10 +24,15 @@ A Docker-based development environment with client build/test prerequisites pre-
 
 The viewer visualizes AODT simulations in a 3D geospatial interface. Setup, usage, and development instructions are documented in [`viewer/README.md`](viewer/README.md).
 
-## Resources
+## NVIDIA AI Aerial™
 
-Updates on new software releases, NVIDIA 6G events, and technical training for AI Aerial™ are available via the [NVIDIA 6G Developer Program](https://developer.nvidia.com/6g-program).
+NVIDIA Aerial™ Omniverse Digital Twin (AODT) is a part of [NVIDIA AI Aerial™](https://developer.nvidia.com/industries/telecommunications/ai-aerial), a portfolio of accelerated computing platforms, software and tools to build, train, simulate, and deploy AI-native wireless networks. Learn more in [AI Aerial™ Documentation](https://docs.nvidia.com/aerial/index.html).
 
-The Aerial Omniverse Digital Twin collection is available on [NVIDIA NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/aerial/collections/aerial-omniverse-digital-twin).
+The following AI Aerial™ software is available as open source:
 
-Full documentation is available at [NVIDIA Docs Hub](https://docs.nvidia.com/aerial/).
+- NVIDIA Aerial™ Omniverse Digital Twin (this repository)
+- [NVIDIA Aerial™ CUDA-Accelerated RAN](https://github.com/NVIDIA/aerial-cuda-accelerated-ran)
+- [NVIDIA Aerial™ Framework](https://github.com/NVIDIA/aerial-framework)
+- [NVIDIA AI Aerial™ Sample Applications](https://github.com/NVIDIA/aerial-sample-apps)
+
+Visit the [NVIDIA 6G Developer Program](https://developer.nvidia.com/6g-program) for software releases, 6G events and technical training for AI Aerial™.
